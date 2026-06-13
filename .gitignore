@@ -1,0 +1,38 @@
+# Build artifacts
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.log
+*.idb
+*.ipch
+*.tlog
+*.lastbuildstate
+*.FileListAbsolute.txt
+*.res
+*.exp
+*.lib
+
+# Build directories
+build/
+Debug/
+Release/
+x64/
+x86/
+out/
+
+# VS artifacts
+.vs/
+*.suo
+*.user
+*.ncb
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile

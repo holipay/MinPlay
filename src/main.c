@@ -1,0 +1,114 @@
+#include <windows.h>
+#include <stdio.h>
+#include <mfapi.h>
+#include "core/player.h"
+#include "util/log.h"
+
+static Player*      g_player = NULL;
+static HWND         g_hwnd   = NULL;
+
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            if (g_player) {
+                player_paint(g_player, hdc, rc.right, rc.bottom);
+            } else {
+                FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+
+        case WM_ERASEBKGND:
+            return 1;
+
+        case WM_SIZE:
+            InvalidateRect(hwnd, NULL, FALSE);
+            break;
+
+        case WM_KEYDOWN:
+            if (!g_player) break;
+            switch (wp) {
+                case VK_SPACE:
+                    player_pause_toggle(g_player);
+                    break;
+                case VK_LEFT: {
+                    double pos = player_get_position(g_player) - 10.0;
+                    player_seek(g_player, pos < 0 ? 0 : pos);
+                    break;
+                }
+                case VK_RIGHT: {
+                    double pos = player_get_position(g_player) + 10.0;
+                    double dur = player_get_duration(g_player);
+                    player_seek(g_player, pos > dur ? dur : pos);
+                    break;
+                }
+                case VK_ESCAPE:
+                    DestroyWindow(hwnd);
+                    break;
+            }
+            break;
+
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            break;
+
+        default:
+            return DefWindowProc(hwnd, msg, wp, lp);
+    }
+    return 0;
+}
+
+int main(int argc, char* argv[])
+{
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    MFStartup(MF_VERSION, 0);
+
+    wchar_t url[2048] = L"test.mp4";
+    if (argc > 1)
+        MultiByteToWideChar(CP_UTF8, 0, argv[1], -1, url, 2048);
+
+    WNDCLASSEX wc = {sizeof(wc)};
+    wc.style         = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = GetModuleHandle(NULL);
+    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = TEXT("MiniPlayer");
+    RegisterClassEx(&wc);
+
+    RECT rc = {0, 0, 1280, 720};
+    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+    g_hwnd = CreateWindowEx(0, TEXT("MiniPlayer"), TEXT("Mini Player"),
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        rc.right - rc.left, rc.bottom - rc.top,
+        NULL, NULL, GetModuleHandle(NULL), NULL);
+
+    g_player = player_create(g_hwnd);
+    if (!player_open(g_player, url)) {
+        MessageBoxA(NULL, "Failed to open media file", "Error", MB_OK);
+        return 1;
+    }
+
+    player_play(g_player);
+    LOG_INFO("Playing: %S", url);
+
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    player_close(g_player);
+    player_destroy(g_player);
+
+    MFShutdown();
+    CoUninitialize();
+    return 0;
+}
