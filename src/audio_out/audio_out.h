@@ -7,6 +7,11 @@ typedef struct AudioOut AudioOut;
 
 AudioOut*   ao_create(int sample_rate, int channels, int bits);
 void        ao_write(AudioOut* ao, const uint8_t* data, int size);
+void        ao_set_pts(AudioOut* ao, double pts);
+int         ao_get_buffered(AudioOut* ao);
+int         ao_get_free(AudioOut* ao);
+int         ao_is_playing(AudioOut* ao);
+double      ao_get_position_sec(AudioOut* ao);
 void        ao_pause(AudioOut* ao);
 void        ao_resume(AudioOut* ao);
 void        ao_reset(AudioOut* ao);

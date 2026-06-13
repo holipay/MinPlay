@@ -2,6 +2,9 @@
 #define PLAYER_H
 
 #include <windows.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
 
 typedef struct Player Player;
 
@@ -28,5 +31,11 @@ int             player_has_video(Player* p);
 int             player_has_audio(Player* p);
 
 void            player_paint(Player* p, HDC hdc, int w, int h);
+
+void            player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp);
+void            player_process_audio_frame(Player* p, IMFSample* sample, LONGLONG timestamp);
+void            player_check_audio(Player* p);
+int             player_is_audio_done(Player* p);
+int             player_is_finished(Player* p);
 
 #endif

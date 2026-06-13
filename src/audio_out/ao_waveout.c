@@ -22,6 +22,9 @@ struct AudioOut {
 
     HANDLE    playback_thread;
     volatile int playing;
+
+    int bytes_per_sec;
+    volatile LONG64 hw_position;
 };
 
 static DWORD WINAPI playback_thread_proc(LPVOID arg) {
@@ -29,6 +32,11 @@ static DWORD WINAPI playback_thread_proc(LPVOID arg) {
     int wave_idx = 0;
 
     while (ao->playing) {
+        MMTIME mt = {0};
+        mt.wType = TIME_BYTES;
+        if (waveOutGetPosition(ao->handle, &mt, sizeof(mt)) == MMSYSERR_NOERROR)
+            ao->hw_position = (LONG64)mt.u.cb;
+
         if (!(ao->headers[wave_idx].dwFlags & WHDR_DONE)) {
             Sleep(1);
             continue;
@@ -46,6 +54,7 @@ static DWORD WINAPI playback_thread_proc(LPVOID arg) {
         ao->ring_tail = (tail + WAVE_SIZE) % RING_SIZE;
 
         ao->headers[wave_idx].dwBytesRecorded = 0;
+        ao->headers[wave_idx].dwBufferLength = WAVE_SIZE;
         ao->headers[wave_idx].dwFlags = WHDR_PREPARED;
         ao->headers[wave_idx].dwLoops = 0;
         waveOutWrite(ao->handle, &ao->headers[wave_idx], sizeof(WAVEHDR));
@@ -74,6 +83,8 @@ AudioOut* ao_create(int rate, int channels, int bits) {
         return ao;
     }
 
+    ao->bytes_per_sec = wfx.nAvgBytesPerSec;
+
     for (int i = 0; i < WAVE_BUFS; i++) {
         memset(&ao->headers[i], 0, sizeof(WAVEHDR));
         ao->headers[i].lpData         = (LPSTR)ao->wave_bufs[i];
@@ -94,12 +105,9 @@ void ao_write(AudioOut* ao, const uint8_t* data, int size) {
 
     int head = ao->ring_head;
     int tail = ao->ring_tail;
-    int free = (tail - head - 1 + RING_SIZE) % RING_SIZE;
+    int avail = (tail - head - 1 + RING_SIZE) % RING_SIZE;
 
-    if (size > free) {
-        int skip = size - free;
-        ao->ring_tail = (tail + skip) % RING_SIZE;
-    }
+    if (size > avail) return;
 
     while (size > 0) {
         int chunk = RING_SIZE - head;
@@ -110,6 +118,38 @@ void ao_write(AudioOut* ao, const uint8_t* data, int size) {
         size -= chunk;
     }
     ao->ring_head = head;
+}
+
+void ao_set_pts(AudioOut* ao, double pts) {
+    (void)ao; (void)pts;
+}
+
+int ao_get_buffered(AudioOut* ao) {
+    if (!ao) return 0;
+    int head = ao->ring_head;
+    int tail = ao->ring_tail;
+    return (head - tail + RING_SIZE) % RING_SIZE;
+}
+
+int ao_get_free(AudioOut* ao) {
+    if (!ao) return 0;
+    int head = ao->ring_head;
+    int tail = ao->ring_tail;
+    return (tail - head - 1 + RING_SIZE) % RING_SIZE;
+}
+
+double ao_get_position_sec(AudioOut* ao) {
+    if (!ao || ao->bytes_per_sec <= 0) return 0;
+    return (double)ao->hw_position / ao->bytes_per_sec;
+}
+
+int ao_is_playing(AudioOut* ao) {
+    if (!ao || !ao->ready) return 0;
+    for (int i = 0; i < WAVE_BUFS; i++) {
+        if (!(ao->headers[i].dwFlags & WHDR_DONE))
+            return 1;
+    }
+    return 0;
 }
 
 void ao_pause(AudioOut* ao) {
@@ -125,6 +165,7 @@ void ao_reset(AudioOut* ao) {
     waveOutReset(ao->handle);
     ao->ring_head = 0;
     ao->ring_tail = 0;
+    ao->hw_position = 0;
     for (int i = 0; i < WAVE_BUFS; i++) {
         ao->headers[i].dwFlags = WHDR_DONE;
         ao->headers[i].dwBufferLength = WAVE_SIZE;

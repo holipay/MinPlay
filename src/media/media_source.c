@@ -41,13 +41,21 @@ static HRESULT get_uint64_pair(IMFAttributes* attr, REFGUID key,
 }
 
 MediaSource* media_open(const wchar_t* url) {
+    return media_open_with_callback(url, NULL);
+}
+
+MediaSource* media_open_with_callback(const wchar_t* url,
+                                       IMFSourceReaderCallback* cb) {
     MediaSource* src = (MediaSource*)calloc(1, sizeof(MediaSource));
     if (!src) return NULL;
 
     IMFAttributes* sattrs = NULL;
-    MFCreateAttributes(&sattrs, 2);
+    MFCreateAttributes(&sattrs, cb ? 3 : 2);
     IMFAttributes_SetUINT32(sattrs, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
     IMFAttributes_SetUINT32(sattrs, &MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+    if (cb) {
+        IMFAttributes_SetUnknown(sattrs, &MF_SOURCE_READER_ASYNC_CALLBACK, (IUnknown*)cb);
+    }
 
     HRESULT hr = MFCreateSourceReaderFromURL(url, sattrs, &src->reader);
     if (sattrs) sattrs->lpVtbl->Release(sattrs);
@@ -112,21 +120,23 @@ MediaSource* media_open(const wchar_t* url) {
     PropVariantClear(&dur);
     LOG_INFO("Duration: %.1f s", src->duration);
 
-    src->video_stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM;
-    src->audio_stream = 0;
+    src->video_stream = (DWORD)-1;
+    src->audio_stream = (DWORD)-1;
     for (DWORD i = 0; i < 16; i++) {
         IMFMediaType* stmtype = NULL;
         hr = IMFSourceReader_GetNativeMediaType(src->reader, i, 0, &stmtype);
         if (FAILED(hr)) break;
         GUID maj = {0};
         IMFMediaType_GetGUID(stmtype, &MF_MT_MAJOR_TYPE, &maj);
-        if (IsEqualGUID(&maj, &MFMediaType_Audio) && src->audio_stream == 0) {
+        if (IsEqualGUID(&maj, &MFMediaType_Video) && src->video_stream == (DWORD)-1) {
+            src->video_stream = i;
+        } else if (IsEqualGUID(&maj, &MFMediaType_Audio) && src->audio_stream == (DWORD)-1) {
             src->audio_stream = i;
         }
         IMFMediaType_Release(stmtype);
-        if (src->audio_stream > 0) break;
+        if (src->video_stream != (DWORD)-1 && src->audio_stream != (DWORD)-1) break;
     }
-    LOG_INFO("Streams: video=ANY audio=%lu", src->audio_stream);
+    LOG_INFO("Streams: video=%lu audio=%lu", src->video_stream, src->audio_stream);
 
     return src;
 }
@@ -317,4 +327,16 @@ int media_get_video_info(MediaSource* src, VideoInfo* info) {
 }
 int media_get_audio_info(MediaSource* src, AudioInfo* info) {
     if (!src || !info) return -1; *info = src->ai; return 0;
+}
+
+IMFSourceReader* media_get_reader(MediaSource* src) {
+    return src ? src->reader : NULL;
+}
+
+DWORD media_get_video_stream(MediaSource* src) {
+    return src ? src->video_stream : (DWORD)-1;
+}
+
+DWORD media_get_audio_stream(MediaSource* src) {
+    return src ? src->audio_stream : (DWORD)-1;
 }
