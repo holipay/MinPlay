@@ -1,45 +1,62 @@
-#ifndef MEDIA_SOURCE_H
-#define MEDIA_SOURCE_H
-
-#include <stdint.h>
+#pragma once
+#include "../util/com_ptr.h"
 #include <windows.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <cstdint>
 
-typedef struct MediaSource MediaSource;
+struct VideoInfo {
+    int width = 0;
+    int height = 0;
+    double fps = 30.0;
+};
 
-typedef struct {
-    int     width;
-    int     height;
-    double  fps;
-} VideoInfo;
+struct AudioInfo {
+    int sample_rate = 0;
+    int channels = 0;
+    int bits_per_sample = 0;
+};
 
-typedef struct {
-    int     sample_rate;
-    int     channels;
-    int     bits_per_sample;
-} AudioInfo;
+enum class PixelFormat { Unknown = 0, RGB32, NV12, YUY2, I420 };
 
-typedef enum { PF_UNKNOWN = 0, PF_RGB32, PF_NV12, PF_YUY2, PF_I420 } PixelFormat;
+class MediaSource {
+public:
+    MediaSource() = default;
+    ~MediaSource() { Close(); }
 
-MediaSource*    media_open(const wchar_t* path_or_url);
-MediaSource*    media_open_with_callback(const wchar_t* path_or_url,
-                                          IMFSourceReaderCallback* callback);
-void            media_close(MediaSource* src);
+    MediaSource(const MediaSource&) = delete;
+    MediaSource& operator=(const MediaSource&) = delete;
 
-int             media_seek(MediaSource* src, double seconds);
-double          media_get_duration(MediaSource* src);
-double          media_get_position(MediaSource* src);
+    bool Open(const wchar_t* url, IMFSourceReaderCallback* callback = nullptr);
+    void Close();
 
-int             media_has_video(MediaSource* src);
-int             media_has_audio(MediaSource* src);
-int             media_get_video_info(MediaSource* src, VideoInfo* info);
-int             media_get_audio_info(MediaSource* src, AudioInfo* info);
-PixelFormat     media_get_pixel_format(MediaSource* src);
+    bool Seek(double seconds);
+    double Duration() const { return duration_; }
+    double Position() const { return last_position_; }
 
-IMFSourceReader* media_get_reader(MediaSource* src);
-DWORD           media_get_video_stream(MediaSource* src);
-DWORD           media_get_audio_stream(MediaSource* src);
+    bool HasVideo() const { return has_video_; }
+    bool HasAudio() const { return has_audio_; }
+    VideoInfo GetVideoInfo() const { return vi_; }
+    AudioInfo GetAudioInfo() const { return ai_; }
+    PixelFormat GetPixelFormat() const { return pix_fmt_; }
 
-#endif
+    IMFSourceReader* GetReader() const { return reader_.get(); }
+    DWORD GetVideoStream() const { return video_stream_; }
+    DWORD GetAudioStream() const { return audio_stream_; }
+
+private:
+    ComPtr<IMFSourceReader> reader_;
+    bool has_video_ = false;
+    bool has_audio_ = false;
+    DWORD video_stream_ = (DWORD)-1;
+    DWORD audio_stream_ = (DWORD)-1;
+    VideoInfo vi_;
+    AudioInfo ai_;
+    double duration_ = 0;
+    double last_position_ = 0;
+    PixelFormat pix_fmt_ = PixelFormat::Unknown;
+
+    static HRESULT GetUint64Pair(IMFAttributes* attr, REFGUID key,
+                                 UINT32* a, UINT32* b);
+};

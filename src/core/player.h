@@ -1,49 +1,118 @@
-#ifndef PLAYER_H
-#define PLAYER_H
-
+#pragma once
+#include "../util/com_ptr.h"
+#include "../media/media_source.h"
+#include "../video_out/video_output.h"
+#include "../audio_out/audio_output.h"
+#include "../sync/sync_context.h"
+#include "../util/osd.h"
+#include "source_reader_callback.h"
 #include <windows.h>
 #include <mfapi.h>
-#include <mfidl.h>
-#include <mfreadwrite.h>
+#include <cstdint>
+#include <mutex>
 
-/* Timer IDs shared between main.c and player.c */
 #define TIMER_AUDIO_CHECK   1
 #define TIMER_VIDEO_DISPLAY 2
 #define TIMER_EOF_CHECK     3
 
-typedef struct Player Player;
+enum class PlayerState { Stopped, Playing, Paused };
 
-typedef enum {
-    STATE_STOPPED = 0,
-    STATE_PLAYING = 1,
-    STATE_PAUSED  = 2
-} PlayerState;
+class Player {
+public:
+    Player();
+    ~Player();
 
-Player*         player_create(HWND hwnd);
-int             player_open(Player* p, const wchar_t* url);
-void            player_close(Player* p);
-void            player_destroy(Player* p);
+    Player(const Player&) = delete;
+    Player& operator=(const Player&) = delete;
 
-void            player_play(Player* p);
-void            player_pause_toggle(Player* p);
-void            player_stop(Player* p);
-void            player_seek(Player* p, double seconds);
+    bool Open(HWND hwnd, const wchar_t* url);
+    void Close();
+    void Destroy();
 
-PlayerState     player_get_state(Player* p);
-double          player_get_duration(Player* p);
-double          player_get_position(Player* p);
-int             player_has_video(Player* p);
-int             player_has_audio(Player* p);
+    void Play();
+    void PauseToggle();
+    void Seek(double seconds);
 
-void            player_paint(Player* p, HDC hdc, int w, int h);
-void            player_render_d3d(Player* p, int w, int h);
-void            player_video_tick(Player* p);
-void            player_resize(Player* p, int w, int h);
+    void Resize(int w, int h);
+    void Paint(HDC hdc, int w, int h);
+    void VideoTick();
+    void CheckAudio();
+    void ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp);
 
-void            player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp);
-void            player_check_audio(Player* p);
-int             player_is_audio_done(Player* p);
-int             player_is_finished(Player* p);
-double          player_get_video_fps(Player* p);
+    PlayerState GetState() const { return state_; }
+    double GetDuration() const;
+    double GetPosition() const;
+    bool HasVideo() const { return has_video_; }
+    bool HasAudio() const { return has_audio_; }
+    double GetVideoFps() const { return video_fps_; }
+    bool IsFinished() const;
 
-#endif
+private:
+    struct VFrame {
+        uint8_t* data = nullptr;
+        int size = 0;
+        double timestamp = 0;
+        PixelFormat pix_fmt = PixelFormat::Unknown;
+        ~VFrame() { free(data); }
+        VFrame() = default;
+        VFrame(const VFrame&) = delete;
+        VFrame& operator=(const VFrame&) = delete;
+        VFrame(VFrame&& other) noexcept : data(other.data), size(other.size),
+            timestamp(other.timestamp), pix_fmt(other.pix_fmt) { other.data = nullptr; }
+        VFrame& operator=(VFrame&& other) noexcept {
+            if (this != &other) { free(data); data = other.data; size = other.size;
+                timestamp = other.timestamp; pix_fmt = other.pix_fmt; other.data = nullptr; }
+            return *this;
+        }
+    };
+
+    static constexpr int VQ_SIZE = 32;
+
+    HWND hwnd_ = nullptr;
+    PlayerState state_ = PlayerState::Stopped;
+
+    MediaSource* source_ = nullptr;
+    SourceReaderCallback* callback_ = nullptr;
+    VideoOutput* vo_ = nullptr;
+    AudioOutput* ao_ = nullptr;
+    SyncContext* sync_ = nullptr;
+    OSD* osd_ = nullptr;
+
+    bool has_video_ = false;
+    bool has_audio_ = false;
+    int audio_bytes_per_sec_ = 0;
+    double video_fps_ = 30.0;
+
+    LARGE_INTEGER perf_freq_{};
+    double start_time_ = 0;
+    volatile double pause_offset_ = 0;
+    volatile double pause_start_ = 0;
+
+    // Frame queue (producer: MF callback, consumer: main thread)
+    VFrame vq_[VQ_SIZE];
+    volatile int vq_head_ = 0;
+    volatile int vq_tail_ = 0;
+    std::mutex vq_mutex_;
+
+    // Render frame buffer
+    std::mutex frame_mutex_;
+    uint8_t* frame_buf_ = nullptr;
+    int frame_buf_size_ = 0;
+    volatile bool frame_ready_ = false;
+    int frame_w_ = 0;
+    int frame_h_ = 0;
+    int frame_size_ = 0;
+    PixelFormat pix_fmt_ = PixelFormat::Unknown;
+
+    volatile LONG video_first_frame_post_ = 0;
+
+    int win_w_ = 0;
+    int win_h_ = 0;
+
+    static double GetTimeSec(const LARGE_INTEGER& freq);
+    double ElapsedSec() const;
+
+    static uint8_t* ConvertYUY2ToNV12(const uint8_t* yuy2, int w, int h);
+    static uint8_t* ConvertI420ToNV12(const uint8_t* i420, int w, int h);
+    void RenderD3D(int w, int h);
+};
