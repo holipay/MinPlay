@@ -29,6 +29,7 @@ struct Player {
     PlayerState     state;
     int             has_video;
     int             has_audio;
+    int             audio_bytes_per_sec;
 
     SourceReaderCallback* callback;
 
@@ -38,6 +39,7 @@ struct Player {
     volatile int    frame_ready;
     int             frame_w;
     int             frame_h;
+    PixelFormat     pix_fmt;
 
     LARGE_INTEGER   perf_freq;
     double          start_time;
@@ -52,8 +54,6 @@ struct Player {
     HANDLE          vthread;
     volatile int    vthread_running;
     double          paint_frame_ts;
-    volatile int    vtime_initialized;
-    double          audio_clock_base;
 };
 
 static double get_time_sec(Player* p) {
@@ -68,35 +68,84 @@ static double elapsed_sec(Player* p) {
 
 static DWORD WINAPI video_thread_proc(LPVOID arg) {
     Player* p = (Player*)arg;
-    double local_ts = 0;
-    int frame_count = 0;
-    int drop_count = 0;
 
     while (p->vthread_running) {
-        WaitForSingleObject(p->vq_event, 100);
-        if (!p->vthread_running) break;
-        if (p->state != STATE_PLAYING) continue;
+        if (p->state != STATE_PLAYING) {
+            ResetEvent(p->vq_event);
+            WaitForSingleObject(p->vq_event, 100);
+            if (p->has_audio && p->ao) ao_set_speed(p->ao, 1.0);
+            continue;
+        }
 
+        /* Step 1: Ensure at least one frame in queue */
+        for (;;) {
+            EnterCriticalSection(&p->vq_lock);
+            int has_frames = (p->vq_head != p->vq_tail);
+            LeaveCriticalSection(&p->vq_lock);
+            if (has_frames) break;
+            ResetEvent(p->vq_event);
+            WaitForSingleObject(p->vq_event, 50);
+            if (!p->vthread_running) return 0;
+        }
+
+        /* Get master clock and adjust audio speed */
+        double master = 0;
+        if (p->has_audio && p->ao)
+            master = ao_get_clock(p->ao);
+        if (master <= 0.001)
+            master = elapsed_sec(p);
+
+        /* Step 2: Drop frames that are too late */
         for (;;) {
             EnterCriticalSection(&p->vq_lock);
             int head = p->vq_head;
             int tail = p->vq_tail;
             if (head == tail) {
                 LeaveCriticalSection(&p->vq_lock);
-                ResetEvent(p->vq_event);
                 break;
             }
             VFrame* f = &p->vq[head];
-            local_ts = f->timestamp;
-            int size = f->size;
+            int next = (head + 1) % VQ_SIZE;
+            int has_more = (next != tail);
+            double delay = f->timestamp - master;
 
-            int next_head = (head + 1) % VQ_SIZE;
-            if (next_head != tail) {
+            if (delay < -0.1 && has_more) {
                 free(f->data);
                 f->data = NULL;
-                p->vq_head = next_head;
-                drop_count++;
+                p->vq_head = next;
                 LeaveCriticalSection(&p->vq_lock);
+                continue;
+            }
+            LeaveCriticalSection(&p->vq_lock);
+            break;
+        }
+
+        /* Step 3: Display frame at the right time */
+        {
+            EnterCriticalSection(&p->vq_lock);
+            int head = p->vq_head;
+            int tail = p->vq_tail;
+            if (head == tail) {
+                LeaveCriticalSection(&p->vq_lock);
+                if (!src_cb_is_video_eof(p->callback))
+                    src_cb_request_video_read(p->callback);
+                continue;
+            }
+            VFrame* f = &p->vq[head];
+            int size = f->size;
+            int next = (head + 1) % VQ_SIZE;
+            double delay = f->timestamp - master;
+
+            /* A/V sync: no audio speed adjustment — video thread drops/delays frames instead */
+
+            /* Drop frame if too late */
+            if (delay < -0.1 && (head + 1) % VQ_SIZE != tail) {
+                free(f->data);
+                f->data = NULL;
+                p->vq_head = next;
+                LeaveCriticalSection(&p->vq_lock);
+                if (!src_cb_is_video_eof(p->callback))
+                    src_cb_request_video_read(p->callback);
                 continue;
             }
 
@@ -104,7 +153,7 @@ static DWORD WINAPI video_thread_proc(LPVOID arg) {
             if (p->frame_buf && size <= p->frame_buf_size) {
                 memcpy(p->frame_buf, f->data, size);
                 p->frame_ready = 1;
-                p->paint_frame_ts = local_ts;
+                p->paint_frame_ts = f->timestamp;
 
                 IMFMediaType* mt = NULL;
                 IMFSourceReader_GetCurrentMediaType(media_get_reader(p->source),
@@ -121,15 +170,14 @@ static DWORD WINAPI video_thread_proc(LPVOID arg) {
 
             free(f->data);
             f->data = NULL;
-            p->vq_head = next_head;
+            p->vq_head = next;
             LeaveCriticalSection(&p->vq_lock);
 
             InvalidateRect(p->hwnd, NULL, FALSE);
-            frame_count++;
         }
-        if (!src_cb_is_video_eof(p->callback)) {
+
+        if (!src_cb_is_video_eof(p->callback))
             src_cb_request_video_read(p->callback);
-        }
     }
     return 0;
 }
@@ -166,11 +214,21 @@ int player_open(Player* p, const wchar_t* url) {
 
     p->has_video = media_has_video(p->source);
     p->has_audio = media_has_audio(p->source);
+    p->pix_fmt = media_get_pixel_format(p->source);
+
+    if (p->has_video) {
+        VideoInfo vi;
+        media_get_video_info(p->source, &vi);
+        p->frame_w = vi.width;
+        p->frame_h = vi.height;
+    }
 
     if (p->has_audio) {
         AudioInfo ai;
         media_get_audio_info(p->source, &ai);
         p->ao = ao_create(ai.sample_rate, ai.channels, ai.bits_per_sample);
+        p->audio_bytes_per_sec = ai.sample_rate * ai.channels * (ai.bits_per_sample / 8);
+        src_cb_set_audio_out(p->callback, p->ao);
     }
     RECT rc;
     GetClientRect(p->hwnd, &rc);
@@ -222,7 +280,6 @@ void player_play(Player* p) {
     p->state = STATE_PLAYING;
     p->start_time = get_time_sec(p);
     p->pause_offset = 0;
-    p->audio_clock_base = 0;
 
     if (p->has_video && !p->vthread) {
         p->vthread_running = 1;
@@ -263,7 +320,6 @@ void player_seek(Player* p, double seconds) {
     int was_playing = (p->state == STATE_PLAYING);
 
     src_cb_stop(p->callback);
-    p->audio_clock_base = seconds;
     ao_reset(p->ao);
 
     EnterCriticalSection(&p->vq_lock);
@@ -279,8 +335,6 @@ void player_seek(Player* p, double seconds) {
     EnterCriticalSection(&p->frame_lock);
     p->frame_ready = 0;
     LeaveCriticalSection(&p->frame_lock);
-
-    p->vtime_initialized = 0;
 
     if (was_playing) {
         p->state = STATE_PLAYING;
@@ -303,6 +357,84 @@ double player_get_position(Player* p) {
 int player_has_video(Player* p) { return p ? p->has_video : 0; }
 int player_has_audio(Player* p) { return p ? p->has_audio : 0; }
 
+static inline uint8_t clamp255(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+
+static uint8_t* convert_nv12_to_rgb32(const uint8_t* yuv, int w, int h, int* out_size) {
+    int rgb_size = w * h * 4;
+    uint8_t* rgb = (uint8_t*)malloc(rgb_size);
+    if (!rgb) { *out_size = 0; return NULL; }
+    const uint8_t* yp = yuv;
+    const uint8_t* uvp = yuv + w * h;
+    for (int row = 0; row < h; row++) {
+        for (int col = 0; col < w; col++) {
+            int Y = yp[row * w + col];
+            int U = uvp[(row / 2) * w + (col & ~1)] - 128;
+            int V = uvp[(row / 2) * w + (col & ~1) + 1] - 128;
+            int R = Y + (int)(1.402 * V);
+            int G = Y - (int)(0.344 * U) - (int)(0.714 * V);
+            int B = Y + (int)(1.772 * U);
+            int off = (row * w + col) * 4;
+            rgb[off + 0] = clamp255(B);
+            rgb[off + 1] = clamp255(G);
+            rgb[off + 2] = clamp255(R);
+            rgb[off + 3] = 255;
+        }
+    }
+    *out_size = rgb_size;
+    return rgb;
+}
+
+static uint8_t* convert_yuy2_to_rgb32(const uint8_t* yuv, int w, int h, int* out_size) {
+    int rgb_size = w * h * 4;
+    uint8_t* rgb = (uint8_t*)malloc(rgb_size);
+    if (!rgb) { *out_size = 0; return NULL; }
+    for (int row = 0; row < h; row++) {
+        for (int col = 0; col < w; col++) {
+            int px = col / 2;
+            const uint8_t* pkt = yuv + (row * w + col - (col & 1)) * 2;
+            int Y = pkt[0 + (col & 1) * 2];
+            int U = pkt[1] - 128;
+            int V = pkt[3] - 128;
+            int R = Y + (int)(1.402 * V);
+            int G = Y - (int)(0.344 * U) - (int)(0.714 * V);
+            int B = Y + (int)(1.772 * U);
+            int off = (row * w + col) * 4;
+            rgb[off + 0] = clamp255(B);
+            rgb[off + 1] = clamp255(G);
+            rgb[off + 2] = clamp255(R);
+            rgb[off + 3] = 255;
+        }
+    }
+    *out_size = rgb_size;
+    return rgb;
+}
+
+static uint8_t* convert_i420_to_rgb32(const uint8_t* yuv, int w, int h, int* out_size) {
+    int rgb_size = w * h * 4;
+    uint8_t* rgb = (uint8_t*)malloc(rgb_size);
+    if (!rgb) { *out_size = 0; return NULL; }
+    const uint8_t* yp = yuv;
+    const uint8_t* up = yuv + w * h;
+    const uint8_t* vp = yuv + w * h + (w / 2) * (h / 2);
+    for (int row = 0; row < h; row++) {
+        for (int col = 0; col < w; col++) {
+            int Y = yp[row * w + col];
+            int U = up[(row / 2) * (w / 2) + col / 2] - 128;
+            int V = vp[(row / 2) * (w / 2) + col / 2] - 128;
+            int R = Y + (int)(1.402 * V);
+            int G = Y - (int)(0.344 * U) - (int)(0.714 * V);
+            int B = Y + (int)(1.772 * U);
+            int off = (row * w + col) * 4;
+            rgb[off + 0] = clamp255(B);
+            rgb[off + 1] = clamp255(G);
+            rgb[off + 2] = clamp255(R);
+            rgb[off + 3] = 255;
+        }
+    }
+    *out_size = rgb_size;
+    return rgb;
+}
+
 void player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp) {
     if (!p || !sample) return;
     if (p->state != STATE_PLAYING) {
@@ -316,6 +448,21 @@ void player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp
         DWORD max_len = 0, cur_len = 0;
         IMFMediaBuffer_Lock(buf, &data, &max_len, &cur_len);
 
+        uint8_t* frame_data = data;
+        int frame_size = (int)cur_len;
+        uint8_t* converted = NULL;
+
+        if (p->pix_fmt == PF_NV12 && p->frame_w > 0 && p->frame_h > 0) {
+            converted = convert_nv12_to_rgb32(data, p->frame_w, p->frame_h, &frame_size);
+            if (converted) frame_data = converted;
+        } else if (p->pix_fmt == PF_YUY2 && p->frame_w > 0 && p->frame_h > 0) {
+            converted = convert_yuy2_to_rgb32(data, p->frame_w, p->frame_h, &frame_size);
+            if (converted) frame_data = converted;
+        } else if (p->pix_fmt == PF_I420 && p->frame_w > 0 && p->frame_h > 0) {
+            converted = convert_i420_to_rgb32(data, p->frame_w, p->frame_h, &frame_size);
+            if (converted) frame_data = converted;
+        }
+
         EnterCriticalSection(&p->vq_lock);
         int next_tail = (p->vq_tail + 1) % VQ_SIZE;
         if (next_tail == p->vq_head) {
@@ -323,16 +470,16 @@ void player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp
             free(p->vq[old_head].data);
             p->vq[old_head].data = NULL;
             p->vq_head = (old_head + 1) % VQ_SIZE;
-            p->vtime_initialized = 0;
         }
         VFrame* f = &p->vq[p->vq_tail];
-        f->data = (uint8_t*)malloc(cur_len);
-        memcpy(f->data, data, cur_len);
-        f->size = (int)cur_len;
+        f->data = (uint8_t*)malloc(frame_size);
+        memcpy(f->data, frame_data, frame_size);
+        f->size = frame_size;
         f->timestamp = timestamp / 10000000.0;
         p->vq_tail = next_tail;
         LeaveCriticalSection(&p->vq_lock);
 
+        free(converted);
         IMFMediaBuffer_Unlock(buf);
         IMFMediaBuffer_Release(buf);
 
@@ -345,42 +492,38 @@ void player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp
 void player_process_audio_frame(Player* p, IMFSample* sample, LONGLONG timestamp) {
     if (!p || !sample) return;
 
-    int buffered = ao_get_buffered(p->ao);
-    int bps = 44100 * 2 * 2;
-    int max_buf = bps / 2;
-
-    if (buffered < max_buf) {
-        IMFMediaBuffer* buf = NULL;
-        if (SUCCEEDED(IMFSample_ConvertToContiguousBuffer(sample, &buf))) {
-            BYTE* data = NULL;
-            DWORD max_len = 0, cur_len = 0;
-            IMFMediaBuffer_Lock(buf, &data, &max_len, &cur_len);
-            ao_write(p->ao, data, (int)cur_len);
-            ao_set_pts(p->ao, timestamp / 10000000.0);
-            IMFMediaBuffer_Unlock(buf);
-            IMFMediaBuffer_Release(buf);
-        }
+    IMFMediaBuffer* buf = NULL;
+    if (SUCCEEDED(IMFSample_ConvertToContiguousBuffer(sample, &buf))) {
+        BYTE* data = NULL;
+        DWORD max_len = 0, cur_len = 0;
+        IMFMediaBuffer_Lock(buf, &data, &max_len, &cur_len);
+        ao_write(p->ao, data, (int)cur_len);
+        ao_set_pts(p->ao, timestamp / 10000000.0);
+        IMFMediaBuffer_Unlock(buf);
+        IMFMediaBuffer_Release(buf);
     }
 
     IMFSample_Release(sample);
-
-    if (buffered < max_buf) {
-        src_cb_request_audio_read(p->callback);
-    }
 }
 
 void player_check_audio(Player* p) {
-    if (!p || p->state != STATE_PLAYING || !p->has_audio) return;
-    if (src_cb_is_audio_eof(p->callback)) return;
-    if (src_cb_is_video_eof(p->callback)) {
-        src_cb_request_audio_read(p->callback);
-        return;
+    if (!p || p->state != STATE_PLAYING) return;
+
+    if (p->has_audio && !src_cb_is_audio_eof(p->callback)) {
+        int buffered = ao_get_buffered(p->ao);
+        int bps = p->audio_bytes_per_sec > 0 ? p->audio_bytes_per_sec : (44100 * 2 * 2);
+        if (buffered < bps / 5) {
+            src_cb_request_audio_read(p->callback);
+        }
     }
-    int buffered = ao_get_buffered(p->ao);
-    int bps = 44100 * 2 * 2;
-    int low_threshold = bps / 10;
-    if (buffered < low_threshold) {
-        src_cb_request_audio_read(p->callback);
+
+    if (p->has_video && !src_cb_is_video_eof(p->callback)) {
+        EnterCriticalSection(&p->vq_lock);
+        int has_frames = (p->vq_head != p->vq_tail);
+        LeaveCriticalSection(&p->vq_lock);
+        if (!has_frames) {
+            src_cb_request_video_read(p->callback);
+        }
     }
 }
 

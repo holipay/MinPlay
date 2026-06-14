@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <mfapi.h>
 #include "core/player.h"
@@ -100,8 +101,11 @@ int main(int argc, char* argv[])
     MFStartup(MF_VERSION, 0);
 
     wchar_t url[2048] = L"test.mp4";
-    if (argc > 1)
-        MultiByteToWideChar(CP_UTF8, 0, argv[1], -1, url, 2048);
+    int wargc = 0;
+    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+    if (wargv && wargc > 1)
+        wcsncpy(url, wargv[1], 2039);
+    if (wargv) LocalFree(wargv);
 
     WNDCLASSEX wc = {sizeof(wc)};
     wc.style         = CS_HREDRAW | CS_VREDRAW;

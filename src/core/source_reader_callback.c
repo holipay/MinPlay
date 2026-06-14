@@ -1,6 +1,7 @@
 #define COBJMACROS
 #define INITGUID
 #include "source_reader_callback.h"
+#include "../audio_out/audio_out.h"
 #include "../util/log.h"
 #include <stdlib.h>
 #include <initguid.h>
@@ -16,6 +17,7 @@ struct SourceReaderCallback {
     IMFSourceReader* reader;
     DWORD           video_stream;
     DWORD           audio_stream;
+    AudioOut*       ao;
 
     CRITICAL_SECTION lock;
     volatile int     running;
@@ -63,33 +65,52 @@ static HRESULT STDMETHODCALLTYPE cb_OnReadSample(IMFSourceReaderCallback* This,
                                                    LONGLONG llTimestamp,
                                                    IMFSample* pSample) {
     SourceReaderCallback* cb = (SourceReaderCallback*)This;
-    if (!cb->running) return S_OK;
-    if (FAILED(hrStatus)) return S_OK;
+
+    if (FAILED(hrStatus) || !cb->running) {
+        if (pSample) IMFSample_Release(pSample);
+        return S_OK;
+    }
 
     if (dwStreamFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
         if (dwStreamIndex == cb->video_stream)
             cb->video_eof = 1;
         else if (dwStreamIndex == cb->audio_stream)
             cb->audio_eof = 1;
+        if (pSample) IMFSample_Release(pSample);
         return S_OK;
     }
 
-    if (!pSample) return S_OK;
-
-    EnterCriticalSection(&cb->lock);
-
-    if (dwStreamIndex == cb->video_stream) {
-        IMFSample_AddRef(pSample);
-        PostMessage(cb->hwnd, WM_APP_VIDEO_FRAME, (WPARAM)pSample, (LPARAM)llTimestamp);
-    } else if (dwStreamIndex == cb->audio_stream) {
-        IMFSample_AddRef(pSample);
-        PostMessage(cb->hwnd, WM_APP_AUDIO_FRAME, (WPARAM)pSample, (LPARAM)llTimestamp);
+    if (pSample) {
+        if (dwStreamIndex == cb->audio_stream && cb->ao) {
+            IMFMediaBuffer* buf = NULL;
+            if (SUCCEEDED(IMFSample_ConvertToContiguousBuffer(pSample, &buf))) {
+                BYTE* data = NULL;
+                DWORD max_len = 0, cur_len = 0;
+                IMFMediaBuffer_Lock(buf, &data, &max_len, &cur_len);
+                ao_write(cb->ao, data, (int)cur_len);
+                ao_set_pts(cb->ao, llTimestamp / 10000000.0);
+                IMFMediaBuffer_Unlock(buf);
+                IMFMediaBuffer_Release(buf);
+            }
+        } else {
+            IMFSample_AddRef(pSample);
+            BOOL ok = PostMessage(cb->hwnd,
+                dwStreamIndex == cb->video_stream ? WM_APP_VIDEO_FRAME : WM_APP_AUDIO_FRAME,
+                (WPARAM)pSample, (LPARAM)llTimestamp);
+            if (!ok) {
+                IMFSample_Release(pSample);
+            }
+        }
     }
 
-    LeaveCriticalSection(&cb->lock);
-
-    if (cb->running && cb->reader && dwStreamIndex == cb->audio_stream)
-        IMFSourceReader_ReadSample(cb->reader, dwStreamIndex, 0, NULL, NULL, NULL, NULL);
+    if (cb->running && cb->reader) {
+        if (dwStreamIndex == cb->audio_stream && cb->ao) {
+            if (ao_get_free(cb->ao) > 256 * 1024)
+                IMFSourceReader_ReadSample(cb->reader, dwStreamIndex, 0, NULL, NULL, NULL, NULL);
+        } else {
+            IMFSourceReader_ReadSample(cb->reader, dwStreamIndex, 0, NULL, NULL, NULL, NULL);
+        }
+    }
 
     return S_OK;
 }
@@ -125,6 +146,10 @@ void src_cb_destroy(SourceReaderCallback* cb) {
     DeleteCriticalSection(&cb->lock);
     if (cb->ref_count == 1)
         cb->vtbl->Release((IMFSourceReaderCallback*)cb);
+}
+
+void src_cb_set_audio_out(SourceReaderCallback* cb, AudioOut* ao) {
+    if (cb) cb->ao = ao;
 }
 
 HRESULT src_cb_set_on_source_reader(SourceReaderCallback* cb,

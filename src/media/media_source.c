@@ -27,6 +27,7 @@ struct MediaSource {
     AudioInfo ai;
     double duration;
     double last_position;
+    PixelFormat pix_fmt;
 };
 
 static HRESULT get_uint64_pair(IMFAttributes* attr, REFGUID key,
@@ -68,13 +69,21 @@ MediaSource* media_open_with_callback(const wchar_t* url,
     IMFMediaType* vmt = NULL;
     MFCreateMediaType(&vmt);
     IMFMediaType_SetGUID(vmt, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
-    const GUID* fmts[] = { &MFVideoFormat_ARGB32, &MFVideoFormat_RGB32 };
-    for (int fi = 0; fi < 2; fi++) {
-        IMFMediaType_SetGUID(vmt, &MF_MT_SUBTYPE, fmts[fi]);
+
+    struct { const GUID* fmt; enum PixelFormat pf; } fmts[] = {
+        { &MFVideoFormat_ARGB32, PF_RGB32 },
+        { &MFVideoFormat_RGB32,  PF_RGB32 },
+        { &MFVideoFormat_NV12,   PF_NV12  },
+        { &MFVideoFormat_YUY2,   PF_YUY2  },
+        { &MFVideoFormat_I420,   PF_I420  },
+    };
+    for (int fi = 0; fi < 5; fi++) {
+        IMFMediaType_SetGUID(vmt, &MF_MT_SUBTYPE, fmts[fi].fmt);
         hr = IMFSourceReader_SetCurrentMediaType(
             src->reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, vmt);
         if (SUCCEEDED(hr)) {
             src->has_video = 1;
+            src->pix_fmt = fmts[fi].pf;
             IMFMediaType* native = NULL;
             IMFSourceReader_GetCurrentMediaType(
                 src->reader, MF_SOURCE_READER_FIRST_VIDEO_STREAM, &native);
@@ -85,7 +94,7 @@ MediaSource* media_open_with_callback(const wchar_t* url,
             src->vi.height = (int)h;
             src->vi.fps = den ? (double)num / den : 30.0;
             IMFMediaType_Release(native);
-            LOG_INFO("Video: %dx%d @ %.1f fps", w, h, src->vi.fps);
+            LOG_INFO("Video: %dx%d @ %.1f fps (fmt=%d)", w, h, src->vi.fps, src->pix_fmt);
             break;
         }
     }
@@ -327,6 +336,10 @@ int media_get_video_info(MediaSource* src, VideoInfo* info) {
 }
 int media_get_audio_info(MediaSource* src, AudioInfo* info) {
     if (!src || !info) return -1; *info = src->ai; return 0;
+}
+
+PixelFormat media_get_pixel_format(MediaSource* src) {
+    return src ? src->pix_fmt : PF_UNKNOWN;
 }
 
 IMFSourceReader* media_get_reader(MediaSource* src) {
