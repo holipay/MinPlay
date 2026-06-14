@@ -6,6 +6,11 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 
+/* Timer IDs shared between main.c and player.c */
+#define TIMER_AUDIO_CHECK   1
+#define TIMER_VIDEO_DISPLAY 2
+#define TIMER_EOF_CHECK     3
+
 typedef struct Player Player;
 
 typedef enum {

@@ -37,6 +37,8 @@ struct Player {
     SourceReaderCallback* callback;
     SyncContext*    sync;
 
+    volatile LONG  video_first_frame_post;
+
     CRITICAL_SECTION frame_lock;
     uint8_t*        frame_buf;
     int             frame_buf_size;
@@ -79,7 +81,7 @@ void player_video_tick(Player* p) {
         int qsize = p->vq_tail - p->vq_head;
         if (qsize < 0) qsize += VQ_SIZE;
         LeaveCriticalSection(&p->vq_lock);
-        if (qsize < 2)
+        if (qsize < 1)
             src_cb_request_video_read(p->callback);
     }
 
@@ -123,6 +125,9 @@ void player_video_tick(Player* p) {
             p->frame_ready = 1;
             p->frame_size = size;
 
+            /* Update display size from current media type (may differ
+               from negotiated type due to decoder alignment padding) */
+            int old_w = p->frame_w, old_h = p->frame_h;
             IMFMediaType* mt = NULL;
             IMFSourceReader_GetCurrentMediaType(media_get_reader(p->source),
                                                 media_get_video_stream(p->source), &mt);
@@ -133,6 +138,10 @@ void player_video_tick(Player* p) {
                 p->frame_h = (int)(size_val & 0xFFFFFFFF);
                 IMFMediaType_Release(mt);
             }
+            if (p->frame_w == 0 || p->frame_h == 0) {
+                p->frame_w = old_w;
+                p->frame_h = old_h;
+            }
         }
         LeaveCriticalSection(&p->frame_lock);
 
@@ -142,6 +151,16 @@ void player_video_tick(Player* p) {
         break;
     }
     LeaveCriticalSection(&p->vq_lock);
+
+    /* Refill pipeline after consumption */
+    if (p->has_video && p->callback && !src_cb_is_video_eof(p->callback)) {
+        EnterCriticalSection(&p->vq_lock);
+        int qsize = p->vq_tail - p->vq_head;
+        if (qsize < 0) qsize += VQ_SIZE;
+        LeaveCriticalSection(&p->vq_lock);
+        if (qsize < 1)
+            src_cb_request_video_read(p->callback);
+    }
 
     /* Render using cached window size */
     if (p->win_w > 0 && p->win_h > 0)
@@ -250,6 +269,7 @@ void player_play(Player* p) {
     p->start_time = get_time_sec(p);
     p->pause_offset = 0;
 
+    InterlockedExchange(&p->video_first_frame_post, 1);
     ao_resume(p->ao);
     src_cb_start_reading(p->callback);
 }
@@ -302,6 +322,7 @@ void player_seek(Player* p, double seconds) {
         p->state = STATE_PLAYING;
         p->start_time = get_time_sec(p) - seconds;
         p->pause_offset = 0;
+        InterlockedExchange(&p->video_first_frame_post, 1);
         ao_resume(p->ao);
         src_cb_start_reading(p->callback);
     }
@@ -387,6 +408,7 @@ void player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp
         }
 
         EnterCriticalSection(&p->vq_lock);
+        int was_empty = (p->vq_head == p->vq_tail);
         int next_tail = (p->vq_tail + 1) % VQ_SIZE;
         if (next_tail == p->vq_head) {
             int old_head = p->vq_head;
@@ -406,6 +428,10 @@ void player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp
         free(converted);
         IMFMediaBuffer_Unlock(buf);
         IMFMediaBuffer_Release(buf);
+
+        /* Wake main thread for first frame (then let the timer drive) */
+        if (was_empty && InterlockedExchange(&p->video_first_frame_post, 0))
+            PostMessage(p->hwnd, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
     }
 }
 

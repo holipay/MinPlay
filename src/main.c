@@ -7,9 +7,6 @@
 
 static Player*      g_player = NULL;
 static HWND         g_hwnd   = NULL;
-#define TIMER_AUDIO_CHECK   1
-#define TIMER_VIDEO_DISPLAY 2
-#define TIMER_EOF_CHECK     3
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
