@@ -1,4 +1,4 @@
-# MiniPlayer — Agent Guide
+# MinPlay — Agent Guide
 
 ## Build
 
@@ -8,9 +8,9 @@
 cmd /c build.bat
 ```
 
-Requires VS 2026 Community vcvarsall. Output: `MiniPlayer.exe` in project root.
+Requires VS 2026 Community vcvarsall. Output: `MinPlay.exe` in project root.
 
-Run: `.\MiniPlayer.exe D:\photo\build\test\call_me.mp4`
+Run: `.\MinPlay.exe D:\photo\build\test\call_me.mp4`
 
 ## Architecture
 

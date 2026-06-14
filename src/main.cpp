@@ -107,12 +107,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     wc.hInstance     = GetModuleHandle(nullptr);
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    wc.lpszClassName = TEXT("MiniPlayer");
+    wc.lpszClassName = TEXT("MinPlay");
     RegisterClassEx(&wc);
 
     RECT rc = {0, 0, 1280, 720};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
-    g_hwnd = CreateWindowEx(0, TEXT("MiniPlayer"), TEXT("Mini Player"),
+    g_hwnd = CreateWindowEx(0, TEXT("MinPlay"), TEXT("MinPlay"),
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         CW_USEDEFAULT, CW_USEDEFAULT,
         rc.right - rc.left, rc.bottom - rc.top,

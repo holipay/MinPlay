@@ -6,7 +6,7 @@ cl /Od /Zi /W4 /utf-8 /EHsc ^
     src\media\media_source.cpp ^
     src\video_out\d3d11_video_output.cpp src\audio_out\wasapi_audio_output.cpp src\util\osd.cpp ^
     src\sync\sync_context.cpp ^
-    /Fe:MiniPlayer.exe ^
+    /Fe:MinPlay.exe ^
     /link user32.lib gdi32.lib ole32.lib oleaut32.lib shell32.lib ^
           mf.lib mfplat.lib mfreadwrite.lib mfuuid.lib uuid.lib shlwapi.lib d3d11.lib dxgi.lib d3dcompiler.lib
 if %ERRORLEVEL% EQU 0 (

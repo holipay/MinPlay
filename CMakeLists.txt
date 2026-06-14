@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
-project(MiniPlayer C)
+project(MinPlay C)
 
 set(CMAKE_C_STANDARD 17)
 
-add_executable(MiniPlayer WIN32
+add_executable(MinPlay WIN32
     src/main.c
     src/core/player.c
     src/core/source_reader_callback.c
@@ -13,7 +13,7 @@ add_executable(MiniPlayer WIN32
     src/util/osd.c
 )
 
-target_link_libraries(MiniPlayer PRIVATE
+target_link_libraries(MinPlay PRIVATE
     user32
     gdi32
     ole32
@@ -27,11 +27,11 @@ target_link_libraries(MiniPlayer PRIVATE
     shlwapi
 )
 
-target_include_directories(MiniPlayer PRIVATE src)
+target_include_directories(MinPlay PRIVATE src)
 
 if(MSVC)
-    target_compile_options(MiniPlayer PRIVATE /W4 /utf-8)
-    set_target_properties(MiniPlayer PROPERTIES
+    target_compile_options(MinPlay PRIVATE /W4 /utf-8)
+    set_target_properties(MinPlay PROPERTIES
         LINK_FLAGS "/SUBSYSTEM:CONSOLE"
     )
 endif()
