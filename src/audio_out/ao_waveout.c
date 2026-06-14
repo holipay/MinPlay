@@ -25,6 +25,9 @@ struct AudioOut {
 
     int bytes_per_sec;
     volatile LONG64 hw_position;
+    volatile LONG64 total_bytes_written;
+    double last_write_pts;
+    int last_write_size;
 };
 
 static DWORD WINAPI playback_thread_proc(LPVOID arg) {
@@ -107,21 +110,43 @@ void ao_write(AudioOut* ao, const uint8_t* data, int size) {
     int tail = ao->ring_tail;
     int avail = (tail - head - 1 + RING_SIZE) % RING_SIZE;
 
-    if (size > avail) return;
+    int to_write = size < avail ? size : avail;
+    int written = 0;
 
-    while (size > 0) {
+    while (to_write > 0) {
         int chunk = RING_SIZE - head;
-        if (chunk > size) chunk = size;
+        if (chunk > to_write) chunk = to_write;
         memcpy(ao->ring + head, data, chunk);
         head = (head + chunk) % RING_SIZE;
         data += chunk;
-        size -= chunk;
+        to_write -= chunk;
+        written += chunk;
     }
     ao->ring_head = head;
+    ao->total_bytes_written += written;
+    ao->last_write_size = written;
 }
 
 void ao_set_pts(AudioOut* ao, double pts) {
-    (void)ao; (void)pts;
+    if (!ao) return;
+    ao->last_write_pts = pts;
+}
+
+double ao_get_clock(AudioOut* ao) {
+    if (!ao || ao->bytes_per_sec <= 0) return 0;
+
+    MMTIME mt = {0};
+    mt.wType = TIME_BYTES;
+    if (waveOutGetPosition(ao->handle, &mt, sizeof(mt)) != MMSYSERR_NOERROR)
+        return ao->last_write_pts;
+    LONG64 hw = (LONG64)mt.u.cb;
+
+    double pts_at_head = ao->last_write_pts +
+        (double)ao->last_write_size / ao->bytes_per_sec;
+    LONG64 buffered = ao->total_bytes_written - hw;
+    if (buffered < 0) buffered = 0;
+
+    return pts_at_head - (double)buffered / ao->bytes_per_sec;
 }
 
 int ao_get_buffered(AudioOut* ao) {
@@ -166,6 +191,9 @@ void ao_reset(AudioOut* ao) {
     ao->ring_head = 0;
     ao->ring_tail = 0;
     ao->hw_position = 0;
+    ao->total_bytes_written = 0;
+    ao->last_write_pts = 0;
+    ao->last_write_size = 0;
     for (int i = 0; i < WAVE_BUFS; i++) {
         ao->headers[i].dwFlags = WHDR_DONE;
         ao->headers[i].dwBufferLength = WAVE_SIZE;

@@ -1,6 +1,7 @@
 #define COBJMACROS
 #define INITGUID
 #include "source_reader_callback.h"
+#include "player.h"
 #include "../audio_out/audio_out.h"
 #include "../util/log.h"
 #include <stdlib.h>
@@ -18,12 +19,13 @@ struct SourceReaderCallback {
     DWORD           video_stream;
     DWORD           audio_stream;
     AudioOut*       ao;
+    struct Player*  player;
 
     CRITICAL_SECTION lock;
     volatile int     running;
     volatile int     video_eof;
     volatile int     audio_eof;
-    volatile int     video_pending;
+    volatile LONG   video_pending;
 };
 
 static HRESULT STDMETHODCALLTYPE cb_QueryInterface(IMFSourceReaderCallback* This,
@@ -93,14 +95,9 @@ static HRESULT STDMETHODCALLTYPE cb_OnReadSample(IMFSourceReaderCallback* This,
                 IMFMediaBuffer_Unlock(buf);
                 IMFMediaBuffer_Release(buf);
             }
-        } else {
-            IMFSample_AddRef(pSample);
-            BOOL ok = PostMessage(cb->hwnd,
-                dwStreamIndex == cb->video_stream ? WM_APP_VIDEO_FRAME : WM_APP_AUDIO_FRAME,
-                (WPARAM)pSample, (LPARAM)llTimestamp);
-            if (!ok) {
-                IMFSample_Release(pSample);
-            }
+        } else if (dwStreamIndex == cb->video_stream && cb->player) {
+            /* Process video directly in MF callback thread (same as audio) */
+            player_process_video_frame(cb->player, pSample, llTimestamp);
         }
     }
 
@@ -108,9 +105,9 @@ static HRESULT STDMETHODCALLTYPE cb_OnReadSample(IMFSourceReaderCallback* This,
         if (dwStreamIndex == cb->audio_stream && cb->ao) {
             if (ao_get_free(cb->ao) > 256 * 1024)
                 IMFSourceReader_ReadSample(cb->reader, dwStreamIndex, 0, NULL, NULL, NULL, NULL);
-        } else {
-            InterlockedIncrement(&cb->video_pending);
-            if (cb->video_pending < 8) {
+        } else if (dwStreamIndex == cb->video_stream) {
+            LONG vp = InterlockedIncrement(&cb->video_pending);
+            if (vp < 2) {
                 IMFSourceReader_ReadSample(cb->reader, dwStreamIndex, 0, NULL, NULL, NULL, NULL);
             }
         }
@@ -154,6 +151,10 @@ void src_cb_destroy(SourceReaderCallback* cb) {
 
 void src_cb_set_audio_out(SourceReaderCallback* cb, AudioOut* ao) {
     if (cb) cb->ao = ao;
+}
+
+void src_cb_set_player(SourceReaderCallback* cb, struct Player* player) {
+    if (cb) cb->player = player;
 }
 
 HRESULT src_cb_set_on_source_reader(SourceReaderCallback* cb,
@@ -232,6 +233,5 @@ void src_cb_consume_video(SourceReaderCallback* cb) {
     if (cb) InterlockedDecrement(&cb->video_pending);
 }
 
-int src_cb_video_pending(SourceReaderCallback* cb) {
-    return cb ? cb->video_pending : 0;
-}
+
+

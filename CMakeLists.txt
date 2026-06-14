@@ -6,9 +6,10 @@ set(CMAKE_C_STANDARD 17)
 add_executable(MiniPlayer WIN32
     src/main.c
     src/core/player.c
+    src/core/source_reader_callback.c
     src/media/media_source.c
     src/video_out/vo_gdi.c
-    src/audio_out/ao_waveout.c
+    src/audio_out/ao_wasapi.c
     src/util/osd.c
 )
 

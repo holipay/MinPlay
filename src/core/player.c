@@ -4,6 +4,7 @@
 #include "../media/media_source.h"
 #include "../video_out/video_out.h"
 #include "../audio_out/audio_out.h"
+#include "../sync/sync.h"
 #include "../util/log.h"
 #include <stdlib.h>
 #include <string.h>
@@ -15,9 +16,10 @@
 #define VQ_SIZE 32
 
 typedef struct {
-    uint8_t* data;
-    int      size;
-    double   timestamp;
+    uint8_t*    data;
+    int         size;
+    double      timestamp;
+    PixelFormat pix_fmt;
 } VFrame;
 
 struct Player {
@@ -30,8 +32,10 @@ struct Player {
     int             has_video;
     int             has_audio;
     int             audio_bytes_per_sec;
+    double          video_fps;
 
     SourceReaderCallback* callback;
+    SyncContext*    sync;
 
     CRITICAL_SECTION frame_lock;
     uint8_t*        frame_buf;
@@ -51,15 +55,9 @@ struct Player {
     volatile int    vq_head;
     volatile int    vq_tail;
     CRITICAL_SECTION vq_lock;
-    HANDLE          vq_event;
-    HANDLE          vthread;
-    volatile int    vthread_running;
-    double          paint_frame_ts;
 
-    HDC             back_dc;
-    HBITMAP         back_bm;
-    int             back_w;
-    int             back_h;
+    int             win_w;
+    int             win_h;
 };
 
 static double get_time_sec(Player* p) {
@@ -72,135 +70,82 @@ static double elapsed_sec(Player* p) {
     return get_time_sec(p) - p->start_time - p->pause_offset;
 }
 
-static DWORD WINAPI video_thread_proc(LPVOID arg) {
-    Player* p = (Player*)arg;
+void player_video_tick(Player* p) {
+    if (!p || p->state != STATE_PLAYING) return;
 
-    while (p->vthread_running) {
-        if (p->state != STATE_PLAYING) {
-            ResetEvent(p->vq_event);
-            WaitForSingleObject(p->vq_event, 100);
-            continue;
-        }
+    /* Keep video pipeline fed at display rate (instead of burst from callback) */
+    if (p->has_video && p->callback && !src_cb_is_video_eof(p->callback)) {
+        EnterCriticalSection(&p->vq_lock);
+        int qsize = p->vq_tail - p->vq_head;
+        if (qsize < 0) qsize += VQ_SIZE;
+        LeaveCriticalSection(&p->vq_lock);
+        if (qsize < 2)
+            src_cb_request_video_read(p->callback);
+    }
 
-        /* Wait for at least one frame in queue */
-        for (;;) {
-            EnterCriticalSection(&p->vq_lock);
-            int has_frames = (p->vq_head != p->vq_tail);
-            LeaveCriticalSection(&p->vq_lock);
-            if (has_frames) break;
-            ResetEvent(p->vq_event);
-            WaitForSingleObject(p->vq_event, 50);
-            if (!p->vthread_running) return 0;
-        }
+    /* Early-out: no frames in queue and no frame ready to render */
+    if (p->vq_head == p->vq_tail && !p->frame_ready)
+        return;
 
-        /* Get PTS-based audio clock */
-        double audio_clk = 0;
-        if (p->has_audio && p->ao)
-            audio_clk = ao_get_clock(p->ao);
-        if (audio_clk <= 0.001)
-            audio_clk = elapsed_sec(p);
+    /* Get master clock from ao PTS-based clock */
+    double audio_clk = 0;
+    if (p->has_audio && p->ao)
+        audio_clk = ao_get_clock(p->ao);
+    if (audio_clk <= 0.001)
+        audio_clk = elapsed_sec(p);
 
-        /* Drop late frames */
-        for (;;) {
-            EnterCriticalSection(&p->vq_lock);
-            int head = p->vq_head;
-            int tail = p->vq_tail;
-            if (head == tail) { LeaveCriticalSection(&p->vq_lock); break; }
-            VFrame* f = &p->vq[head];
-            double diff = f->timestamp - audio_clk;
-            int has_more = ((head + 1) % VQ_SIZE != tail);
-            if (diff < -0.100 && has_more) {
-                int next = (head + 1) % VQ_SIZE;
-                free(f->data); f->data = NULL;
-                p->vq_head = next;
-                LeaveCriticalSection(&p->vq_lock);
-                src_cb_consume_video(p->callback);
-                continue;
-            }
-            LeaveCriticalSection(&p->vq_lock);
-            break;
-        }
+    /* Find the best frame to display using sync decision */
+    EnterCriticalSection(&p->vq_lock);
+    for (;;) {
+        int head = p->vq_head;
+        int tail = p->vq_tail;
+        if (head == tail) break;
 
-        /* Display frame or wait */
-        {
-            EnterCriticalSection(&p->vq_lock);
-            int head = p->vq_head;
-            int tail = p->vq_tail;
-            if (head == tail) {
-                LeaveCriticalSection(&p->vq_lock);
-                continue;
-            }
-            VFrame* f = &p->vq[head];
-            int size = f->size;
-            int next = (head + 1) % VQ_SIZE;
-            double diff = f->timestamp - audio_clk;
+        VFrame* f = &p->vq[head];
+        SyncDecision sd = sync_video(p->sync, f->timestamp, audio_clk);
+        int next = (head + 1) % VQ_SIZE;
+        int has_more = (next != tail);
 
-            int action = 0; /* 0=render, 1=wait, 2=drop */
-            int wait_ms = 0;
-
-            if (diff < -0.100) {
-                action = 2; /* too late, drop if more frames */
-            } else if (diff < -0.010) {
-                action = 0; /* slightly late, render now */
-            } else if (diff < 0.010) {
-                action = 0; /* in sync, render now */
-            } else if (diff < 0.500) {
-                action = 1;
-                wait_ms = (int)(diff * 1000);
-            } else {
-                action = 1;
-                wait_ms = 100; /* cap at 100ms */
-            }
-
-            if (action == 2 && (head + 1) % VQ_SIZE != tail) {
-                free(f->data); f->data = NULL;
-                p->vq_head = next;
-                LeaveCriticalSection(&p->vq_lock);
-                src_cb_consume_video(p->callback);
-                continue;
-            }
-
-            if (action == 1) {
-                LeaveCriticalSection(&p->vq_lock);
-                if (wait_ms > 0 && wait_ms < 200) {
-                    ResetEvent(p->vq_event);
-                    WaitForSingleObject(p->vq_event, wait_ms);
-                } else {
-                    Sleep(1);
-                }
-                continue;
-            }
-
-            /* action == 0: render */
-            EnterCriticalSection(&p->frame_lock);
-            if (p->frame_buf && size <= p->frame_buf_size) {
-                memcpy(p->frame_buf, f->data, size);
-                p->frame_ready = 1;
-                p->paint_frame_ts = f->timestamp;
-                p->frame_size = size;
-
-                IMFMediaType* mt = NULL;
-                IMFSourceReader_GetCurrentMediaType(media_get_reader(p->source),
-                                                    media_get_video_stream(p->source), &mt);
-                if (mt) {
-                    UINT64 size_val = 0;
-                    IMFAttributes_GetUINT64((IMFAttributes*)mt, &MF_MT_FRAME_SIZE, &size_val);
-                    p->frame_w = (int)(size_val >> 32);
-                    p->frame_h = (int)(size_val & 0xFFFFFFFF);
-                    IMFMediaType_Release(mt);
-                }
-            }
-            LeaveCriticalSection(&p->frame_lock);
-
+        if (sd.action == SYNC_DROP && has_more) {
             free(f->data); f->data = NULL;
             p->vq_head = next;
-            LeaveCriticalSection(&p->vq_lock);
             src_cb_consume_video(p->callback);
-
-            InvalidateRect(p->hwnd, NULL, FALSE);
+            continue;
         }
+        if (sd.action == SYNC_WAIT) {
+            break;
+        }
+        /* SYNC_RENDER — display */
+        int size = f->size;
+        EnterCriticalSection(&p->frame_lock);
+        if (p->frame_buf && size <= p->frame_buf_size) {
+            memcpy(p->frame_buf, f->data, size);
+            p->frame_ready = 1;
+            p->frame_size = size;
+
+            IMFMediaType* mt = NULL;
+            IMFSourceReader_GetCurrentMediaType(media_get_reader(p->source),
+                                                media_get_video_stream(p->source), &mt);
+            if (mt) {
+                UINT64 size_val = 0;
+                IMFAttributes_GetUINT64((IMFAttributes*)mt, &MF_MT_FRAME_SIZE, &size_val);
+                p->frame_w = (int)(size_val >> 32);
+                p->frame_h = (int)(size_val & 0xFFFFFFFF);
+                IMFMediaType_Release(mt);
+            }
+        }
+        LeaveCriticalSection(&p->frame_lock);
+
+        free(f->data); f->data = NULL;
+        p->vq_head = next;
+        src_cb_consume_video(p->callback);
+        break;
     }
-    return 0;
+    LeaveCriticalSection(&p->vq_lock);
+
+    /* Render using cached window size */
+    if (p->win_w > 0 && p->win_h > 0)
+        player_render_d3d(p, p->win_w, p->win_h);
 }
 
 Player* player_create(HWND hwnd) {
@@ -209,10 +154,13 @@ Player* player_create(HWND hwnd) {
     p->state = STATE_STOPPED;
     InitializeCriticalSection(&p->frame_lock);
     InitializeCriticalSection(&p->vq_lock);
-    p->vq_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     QueryPerformanceFrequency(&p->perf_freq);
     p->frame_buf_size = 3840 * 2160 * 4;
     p->frame_buf = malloc(p->frame_buf_size);
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    p->win_w = rc.right;
+    p->win_h = rc.bottom;
     return p;
 }
 
@@ -242,6 +190,7 @@ int player_open(Player* p, const wchar_t* url) {
         media_get_video_info(p->source, &vi);
         p->frame_w = vi.width;
         p->frame_h = vi.height;
+        p->video_fps = vi.fps;
     }
 
     if (p->has_audio) {
@@ -251,10 +200,17 @@ int player_open(Player* p, const wchar_t* url) {
         p->audio_bytes_per_sec = ai.sample_rate * ai.channels * (ai.bits_per_sample / 8);
         src_cb_set_audio_out(p->callback, p->ao);
     }
+
+    /* Create sync context with adaptive window */
+    double sync_window = 0.020;
+    if (p->has_audio && p->ao && ao_is_exclusive(p->ao))
+        sync_window = 0.010;
+    p->sync = sync_create(sync_window);
     RECT rc;
     GetClientRect(p->hwnd, &rc);
     p->vo = vo_create(p->hwnd, rc.right, rc.bottom);
 
+    src_cb_set_player(p->callback, p);
     src_cb_set_on_source_reader(p->callback, media_get_reader(p->source),
                                  media_get_video_stream(p->source),
                                  media_get_audio_stream(p->source));
@@ -264,14 +220,6 @@ int player_open(Player* p, const wchar_t* url) {
 void player_close(Player* p) {
     if (!p) return;
     player_stop(p);
-
-    if (p->vthread) {
-        p->vthread_running = 0;
-        SetEvent(p->vq_event);
-        WaitForSingleObject(p->vthread, 3000);
-        CloseHandle(p->vthread);
-        p->vthread = NULL;
-    }
 
     EnterCriticalSection(&p->vq_lock);
     for (int i = 0; i < VQ_SIZE; i++) {
@@ -283,6 +231,7 @@ void player_close(Player* p) {
 
     if (p->vo) { vo_destroy(p->vo); p->vo = NULL; }
     if (p->ao) { ao_destroy(p->ao); p->ao = NULL; }
+    if (p->sync) { sync_destroy(p->sync); p->sync = NULL; }
     if (p->source) { media_close(p->source); p->source = NULL; }
     if (p->callback) { src_cb_destroy(p->callback); p->callback = NULL; }
 }
@@ -290,11 +239,8 @@ void player_close(Player* p) {
 void player_destroy(Player* p) {
     if (!p) return;
     if (p->frame_buf) { free(p->frame_buf); p->frame_buf = NULL; }
-    if (p->back_bm) { DeleteObject(p->back_bm); }
-    if (p->back_dc) DeleteDC(p->back_dc);
     DeleteCriticalSection(&p->frame_lock);
     DeleteCriticalSection(&p->vq_lock);
-    if (p->vq_event) { CloseHandle(p->vq_event); p->vq_event = NULL; }
     free(p);
 }
 
@@ -303,11 +249,6 @@ void player_play(Player* p) {
     p->state = STATE_PLAYING;
     p->start_time = get_time_sec(p);
     p->pause_offset = 0;
-
-    if (p->has_video && !p->vthread) {
-        p->vthread_running = 1;
-        p->vthread = CreateThread(NULL, 0, video_thread_proc, p, 0, NULL);
-    }
 
     ao_resume(p->ao);
     src_cb_start_reading(p->callback);
@@ -318,7 +259,6 @@ void player_pause_toggle(Player* p) {
     if (p->state == STATE_PLAYING) {
         p->state = STATE_PAUSED;
         p->pause_start = get_time_sec(p);
-        SetEvent(p->vq_event);
         src_cb_stop(p->callback);
         ao_pause(p->ao);
     } else if (p->state == STATE_PAUSED) {
@@ -332,7 +272,6 @@ void player_pause_toggle(Player* p) {
 void player_stop(Player* p) {
     if (!p) return;
     p->state = STATE_STOPPED;
-    SetEvent(p->vq_event);
     if (p->callback) src_cb_stop(p->callback);
     ao_reset(p->ao);
 }
@@ -380,90 +319,51 @@ double player_get_position(Player* p) {
 int player_has_video(Player* p) { return p ? p->has_video : 0; }
 int player_has_audio(Player* p) { return p ? p->has_audio : 0; }
 
-static inline uint8_t clamp255(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
-
-static uint8_t* convert_nv12_to_rgb32(const uint8_t* yuv, int w, int h, int* out_size) {
-    int rgb_size = w * h * 4;
-    uint8_t* rgb = (uint8_t*)malloc(rgb_size);
-    if (!rgb) { *out_size = 0; return NULL; }
-    const uint8_t* yp = yuv;
-    const uint8_t* uvp = yuv + w * h;
+static uint8_t* convert_yuy2_to_nv12(const uint8_t* yuy2, int w, int h) {
+    int y_size = w * h;
+    int nv12_size = y_size + y_size / 2;
+    uint8_t* nv12 = (uint8_t*)malloc(nv12_size);
+    if (!nv12) return NULL;
+    uint8_t* yp = nv12;
+    uint8_t* uvp = nv12 + y_size;
     for (int row = 0; row < h; row++) {
-        for (int col = 0; col < w; col++) {
-            int Y = yp[row * w + col];
-            int U = uvp[(row / 2) * w + (col & ~1)] - 128;
-            int V = uvp[(row / 2) * w + (col & ~1) + 1] - 128;
-            int R = Y + (int)(1.402 * V);
-            int G = Y - (int)(0.344 * U) - (int)(0.714 * V);
-            int B = Y + (int)(1.772 * U);
-            int off = (row * w + col) * 4;
-            rgb[off + 0] = clamp255(B);
-            rgb[off + 1] = clamp255(G);
-            rgb[off + 2] = clamp255(R);
-            rgb[off + 3] = 255;
+        for (int col = 0; col < w; col += 2) {
+            int src_idx = (row * w + col) * 2;
+            yp[row * w + col]     = yuy2[src_idx];
+            yp[row * w + col + 1] = yuy2[src_idx + 2];
+            if ((row & 1) == 0) {
+                int uv_idx = (row / 2) * w + col;
+                uvp[uv_idx]     = yuy2[src_idx + 1];
+                uvp[uv_idx + 1] = yuy2[src_idx + 3];
+            }
         }
     }
-    *out_size = rgb_size;
-    return rgb;
+    return nv12;
 }
 
-static uint8_t* convert_yuy2_to_rgb32(const uint8_t* yuv, int w, int h, int* out_size) {
-    int rgb_size = w * h * 4;
-    uint8_t* rgb = (uint8_t*)malloc(rgb_size);
-    if (!rgb) { *out_size = 0; return NULL; }
-    for (int row = 0; row < h; row++) {
-        for (int col = 0; col < w; col++) {
-            int px = col / 2;
-            const uint8_t* pkt = yuv + (row * w + col - (col & 1)) * 2;
-            int Y = pkt[0 + (col & 1) * 2];
-            int U = pkt[1] - 128;
-            int V = pkt[3] - 128;
-            int R = Y + (int)(1.402 * V);
-            int G = Y - (int)(0.344 * U) - (int)(0.714 * V);
-            int B = Y + (int)(1.772 * U);
-            int off = (row * w + col) * 4;
-            rgb[off + 0] = clamp255(B);
-            rgb[off + 1] = clamp255(G);
-            rgb[off + 2] = clamp255(R);
-            rgb[off + 3] = 255;
+static uint8_t* convert_i420_to_nv12(const uint8_t* i420, int w, int h) {
+    int y_size = w * h;
+    int nv12_size = y_size + y_size / 2;
+    uint8_t* nv12 = (uint8_t*)malloc(nv12_size);
+    if (!nv12) return NULL;
+    memcpy(nv12, i420, y_size);
+    uint8_t* uvp = nv12 + y_size;
+    const uint8_t* up = i420 + y_size;
+    const uint8_t* vp = up + (w / 2) * (h / 2);
+    int uv_stride = w;
+    for (int row = 0; row < h / 2; row++) {
+        for (int col = 0; col < w / 2; col++) {
+            uvp[row * uv_stride + col * 2]     = up[row * (w / 2) + col];
+            uvp[row * uv_stride + col * 2 + 1] = vp[row * (w / 2) + col];
         }
     }
-    *out_size = rgb_size;
-    return rgb;
-}
-
-static uint8_t* convert_i420_to_rgb32(const uint8_t* yuv, int w, int h, int* out_size) {
-    int rgb_size = w * h * 4;
-    uint8_t* rgb = (uint8_t*)malloc(rgb_size);
-    if (!rgb) { *out_size = 0; return NULL; }
-    const uint8_t* yp = yuv;
-    const uint8_t* up = yuv + w * h;
-    const uint8_t* vp = yuv + w * h + (w / 2) * (h / 2);
-    for (int row = 0; row < h; row++) {
-        for (int col = 0; col < w; col++) {
-            int Y = yp[row * w + col];
-            int U = up[(row / 2) * (w / 2) + col / 2] - 128;
-            int V = vp[(row / 2) * (w / 2) + col / 2] - 128;
-            int R = Y + (int)(1.402 * V);
-            int G = Y - (int)(0.344 * U) - (int)(0.714 * V);
-            int B = Y + (int)(1.772 * U);
-            int off = (row * w + col) * 4;
-            rgb[off + 0] = clamp255(B);
-            rgb[off + 1] = clamp255(G);
-            rgb[off + 2] = clamp255(R);
-            rgb[off + 3] = 255;
-        }
-    }
-    *out_size = rgb_size;
-    return rgb;
+    return nv12;
 }
 
 void player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp) {
     if (!p || !sample) return;
-    if (p->state != STATE_PLAYING) {
-        IMFSample_Release(sample);
+    if (p->state != STATE_PLAYING)
         return;
-    }
 
     IMFMediaBuffer* buf = NULL;
     if (SUCCEEDED(IMFSample_ConvertToContiguousBuffer(sample, &buf))) {
@@ -471,19 +371,19 @@ void player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp
         DWORD max_len = 0, cur_len = 0;
         IMFMediaBuffer_Lock(buf, &data, &max_len, &cur_len);
 
-        uint8_t* frame_data = data;
+        const uint8_t* frame_data = data;
         int frame_size = (int)cur_len;
         uint8_t* converted = NULL;
+        PixelFormat vq_fmt = p->pix_fmt;
 
-        if (p->pix_fmt == PF_NV12 && p->frame_w > 0 && p->frame_h > 0) {
-            converted = convert_nv12_to_rgb32(data, p->frame_w, p->frame_h, &frame_size);
-            if (converted) frame_data = converted;
-        } else if (p->pix_fmt == PF_YUY2 && p->frame_w > 0 && p->frame_h > 0) {
-            converted = convert_yuy2_to_rgb32(data, p->frame_w, p->frame_h, &frame_size);
-            if (converted) frame_data = converted;
-        } else if (p->pix_fmt == PF_I420 && p->frame_w > 0 && p->frame_h > 0) {
-            converted = convert_i420_to_rgb32(data, p->frame_w, p->frame_h, &frame_size);
-            if (converted) frame_data = converted;
+        if (vq_fmt == PF_RGB32 || vq_fmt == PF_NV12) {
+            /* Pass through — GPU handles both natively */
+        } else if (vq_fmt == PF_YUY2 && p->frame_w > 0 && p->frame_h > 0) {
+            converted = convert_yuy2_to_nv12(data, p->frame_w, p->frame_h);
+            if (converted) { frame_data = converted; vq_fmt = PF_NV12; frame_size = p->frame_w * p->frame_h * 3 / 2; }
+        } else if (vq_fmt == PF_I420 && p->frame_w > 0 && p->frame_h > 0) {
+            converted = convert_i420_to_nv12(data, p->frame_w, p->frame_h);
+            if (converted) { frame_data = converted; vq_fmt = PF_NV12; frame_size = p->frame_w * p->frame_h * 3 / 2; }
         }
 
         EnterCriticalSection(&p->vq_lock);
@@ -499,34 +399,14 @@ void player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp
         memcpy(f->data, frame_data, frame_size);
         f->size = frame_size;
         f->timestamp = timestamp / 10000000.0;
+        f->pix_fmt = vq_fmt;
         p->vq_tail = next_tail;
         LeaveCriticalSection(&p->vq_lock);
 
         free(converted);
         IMFMediaBuffer_Unlock(buf);
         IMFMediaBuffer_Release(buf);
-
-        SetEvent(p->vq_event);
     }
-
-    IMFSample_Release(sample);
-}
-
-void player_process_audio_frame(Player* p, IMFSample* sample, LONGLONG timestamp) {
-    if (!p || !sample) return;
-
-    IMFMediaBuffer* buf = NULL;
-    if (SUCCEEDED(IMFSample_ConvertToContiguousBuffer(sample, &buf))) {
-        BYTE* data = NULL;
-        DWORD max_len = 0, cur_len = 0;
-        IMFMediaBuffer_Lock(buf, &data, &max_len, &cur_len);
-        ao_write(p->ao, data, (int)cur_len);
-        ao_set_pts(p->ao, timestamp / 10000000.0);
-        IMFMediaBuffer_Unlock(buf);
-        IMFMediaBuffer_Release(buf);
-    }
-
-    IMFSample_Release(sample);
 }
 
 void player_check_audio(Player* p) {
@@ -563,6 +443,16 @@ int player_is_finished(Player* p) {
         ae = player_is_audio_done(p);
     }
     return ve && ae;
+}
+
+void player_resize(Player* p, int w, int h) {
+    if (!p) return;
+    p->win_w = w;
+    p->win_h = h;
+}
+
+double player_get_video_fps(Player* p) {
+    return p ? p->video_fps : 30.0;
 }
 
 void player_paint(Player* p, HDC hdc, int w, int h) {

@@ -1,0 +1,1513 @@
+# 音画同步完整设计方案
+
+---
+
+## 1. 总体设计
+
+### 1.1 同步策略
+
+```
+核心原则：音频恒速播放，视频追着音频走
+
+原因：
+  耳朵对声音中断极度敏感（>30ms 可察觉）
+  眼睛对画面偶尔丢帧有一定容忍度
+  所以音频作为主时钟，视频负责对齐
+
+实现层次：
+  ┌─────────────────────────────────────────────┐
+  │  Layer 3: 精确等待（sub-frame 级别对齐）     │
+  ├─────────────────────────────────────────────┤
+  │  Layer 2: 硬件音频时钟（WASAPI / waveOut）    │
+  ├─────────────────────────────────────────────┤
+  │  Layer 1: 视频同步决策（等/追/丢）            │
+  ├─────────────────────────────────────────────┤
+  │  Layer 0: 音频设备初始化与自动降级            │
+  └─────────────────────────────────────────────┘
+```
+
+### 1.2 同步精度目标
+
+```
+音频模式            同步窗口      精度        用户感知
+─────────────────────────────────────────────────────
+WASAPI 独占         ±10ms        ±0.5ms      完美
+WASAPI 共享         ±20ms        ±2ms        优秀
+waveOut             ±40ms        ±5ms        良好
+─────────────────────────────────────────────────────
+人耳察觉阈值        ±30ms
+专业要求            ±5ms
+广播级标准          ±1ms
+```
+
+### 1.3 模块关系
+
+```
+┌──────────┐
+│ player.c │ 播放引擎主控
+└────┬─────┘
+     │
+     ├─── sync.h / sync.c           同步决策逻辑
+     │        │
+     │        └─── audio_clock.h/c   音频时钟（可替换实现）
+     │                 │
+     │                 ├─── hw_clock.c    WASAPI 硬件时钟
+     │                 └─── wo_clock.c    waveOut 软件时钟
+     │
+     ├─── precise_sleep.h/c         高精度等待
+     └─── sync_debug.h/c            调试日志
+```
+
+---
+
+## 2. 文件清单
+
+```
+src/
+├── sync/
+│   ├── sync.h              同步决策接口
+│   ├── sync.c              同步决策实现
+│   ├── audio_clock.h       音频时钟抽象接口
+│   ├── audio_clock.c       时钟初始化与自动降级
+│   ├── hw_clock.h          WASAPI 硬件时钟接口
+│   ├── hw_clock.c          WASAPI 硬件时钟实现
+│   ├── wo_clock.h          waveOut 软件时钟接口
+│   ├── wo_clock.c          waveOut 软件时钟实现
+│   ├── precise_sleep.h     高精度等待接口
+│   ├── precise_sleep.c     高精度等待实现
+│   ├── sync_debug.h        同步调试日志接口
+│   └── sync_debug.c        同步调试日志实现
+```
+
+---
+
+## 3. 音频时钟抽象层
+
+### 3.1 接口定义
+
+```c
+// sync/audio_clock.h
+
+#ifndef AUDIO_CLOCK_H
+#define AUDIO_CLOCK_H
+
+#include <stdint.h>
+
+// ============================================================
+// 音频模式枚举（决定同步窗口大小）
+// ============================================================
+typedef enum {
+    AUDIO_CLOCK_NONE = 0,       // 无音频
+    AUDIO_CLOCK_WAVEOUT,        // waveOut 软件时钟
+    AUDIO_CLOCK_WASAPI_SHARED,  // WASAPI 共享模式
+    AUDIO_CLOCK_WASAPI_EXCLUSIVE // WASAPI 独占模式
+} AudioClockMode;
+
+// ============================================================
+// 音频时钟句柄
+// ============================================================
+typedef struct AudioClock AudioClock;
+
+// ============================================================
+// 初始化参数
+// ============================================================
+typedef struct {
+    int     sample_rate;        // 采样率 (Hz)
+    int     channels;           // 壯道数
+    int     bits_per_sample;    // 位深
+    int     prefer_exclusive;   // 是否优先尝试独占模式
+} AudioClockConfig;
+
+// ============================================================
+// 接口函数
+// ============================================================
+
+// 创建音频时钟（自动尝试独占→共享→waveOut）
+// 返回 NULL 表示所有方式都失败
+AudioClock*     aclock_create(const AudioClockConfig* cfg);
+
+// 写入音频数据
+// pcm: PCM 数据指针
+// size: 数据字节数
+// pts: 这批数据对应的时间戳（秒）
+// 返回: 0=成功, -1=错误
+int             aclock_write(AudioClock* clk, const uint8_t* pcm,
+                              int size, double pts);
+
+// 获取当前精确播放时间（秒）
+// 基于硬件位置计算，精度取决于模式
+double          aclock_get_time(AudioClock* clk);
+
+// 重置时钟基准点（seek 时调用）
+void            aclock_reset(AudioClock* clk, double new_pts);
+
+// 清空缓冲区（seek 时调用）
+void            aclock_flush(AudioClock* clk);
+
+// 获取当前模式
+AudioClockMode  aclock_get_mode(AudioClock* clk);
+
+// 获取当前模式对应的同步窗口（秒）
+double          aclock_get_sync_window(AudioClock* clk);
+
+// 获取设备延迟（秒）
+double          aclock_get_latency(AudioClock* clk);
+
+// 销毁
+void            aclock_destroy(AudioClock* clk);
+
+#endif // AUDIO_CLOCK_H
+```
+
+### 3.2 自动降级实现
+
+```c
+// sync/audio_clock.c
+
+#include "audio_clock.h"
+#include "hw_clock.h"
+#include "wo_clock.h"
+#include <stdio.h>
+
+struct AudioClock {
+    AudioClockMode mode;
+    double         sync_window;
+
+    // 内部时钟实现（二选一）
+    HWClock*       hw;      // WASAPI
+    WOClock*       wo;      // waveOut
+
+    // 公共参数
+    int sample_rate;
+    int channels;
+    int bits;
+};
+
+AudioClock* aclock_create(const AudioClockConfig* cfg) {
+    AudioClock* clk = calloc(1, sizeof(AudioClock));
+    clk->sample_rate = cfg->sample_rate;
+    clk->channels    = cfg->channels;
+    clk->bits        = cfg->bits_per_sample;
+
+    // ============================================================
+    // 第一选择：WASAPI 独占模式
+    // ============================================================
+    if (cfg->prefer_exclusive) {
+        clk->hw = hwclock_create(cfg->sample_rate, cfg->channels,
+                                  cfg->bits_per_sample, 1 /*exclusive*/);
+        if (clk->hw) {
+            clk->mode = AUDIO_CLOCK_WASAPI_EXCLUSIVE;
+            clk->sync_window = 0.010;  // ±10ms
+            printf("[音频] WASAPI 独占模式\n");
+            return clk;
+        }
+        printf("[音频] 独占模式不可用\n");
+    }
+
+    // ============================================================
+    // 第二选择：WASAPI 共享模式
+    // ============================================================
+    clk->hw = hwclock_create(cfg->sample_rate, cfg->channels,
+                              cfg->bits_per_sample, 0 /*shared*/);
+    if (clk->hw) {
+        clk->mode = AUDIO_CLOCK_WASAPI_SHARED;
+        clk->sync_window = 0.020;  // ±20ms
+        printf("[音频] WASAPI 共享模式\n");
+        return clk;
+    }
+    printf("[音频] WASAPI 不可用\n");
+
+    // ============================================================
+    // 第三选择：waveOut
+    // ============================================================
+    clk->wo = woclock_create(cfg->sample_rate, cfg->channels,
+                              cfg->bits_per_sample);
+    if (clk->wo) {
+        clk->mode = AUDIO_CLOCK_WAVEOUT;
+        clk->sync_window = 0.040;  // ±40ms
+        printf("[音频] waveOut 模式\n");
+        return clk;
+    }
+    printf("[音频] waveOut 不可用\n");
+
+    // ============================================================
+    // 全部失败
+    // ============================================================
+    clk->mode = AUDIO_CLOCK_NONE;
+    clk->sync_window = 0.040;
+    printf("[音频] 无可用音频设备，视频将以墙钟同步\n");
+    return clk;
+}
+
+int aclock_write(AudioClock* clk, const uint8_t* pcm, int size, double pts) {
+    if (clk->hw) return hwclock_write(clk->hw, pcm, size, pts);
+    if (clk->wo) return woclock_write(clk->wo, pcm, size, pts);
+    return -1;
+}
+
+double aclock_get_time(AudioClock* clk) {
+    if (clk->hw) return hwclock_get_time(clk->hw);
+    if (clk->wo) return woclock_get_time(clk->wo);
+    return -1.0;
+}
+
+void aclock_reset(AudioClock* clk, double new_pts) {
+    if (clk->hw) hwclock_reset(clk->hw, new_pts);
+    if (clk->wo) woclock_reset(clk->wo, new_pts);
+}
+
+void aclock_flush(AudioClock* clk) {
+    if (clk->hw) hwclock_flush(clk->hw);
+    if (clk->wo) woclock_flush(clk->wo);
+}
+
+AudioClockMode aclock_get_mode(AudioClock* clk) { return clk->mode; }
+double aclock_get_sync_window(AudioClock* clk) { return clk->sync_window; }
+
+double aclock_get_latency(AudioClock* clk) {
+    if (clk->hw) return hwclock_get_latency(clk->hw);
+    if (clk->wo) return woclock_get_latency(clk->wo);
+    return 0.0;
+}
+
+void aclock_destroy(AudioClock* clk) {
+    if (!clk) return;
+    if (clk->hw) hwclock_destroy(clk->hw);
+    if (clk->wo) woclock_destroy(clk->wo);
+    free(clk);
+}
+```
+
+---
+
+## 4. WASAPI 硬件时钟
+
+### 4.1 接口定义
+
+```c
+// sync/hw_clock.h
+
+#ifndef HW_CLOCK_H
+#define HW_CLOCK_H
+
+#include <stdint.h>
+
+typedef struct HWClock HWClock;
+
+// 创建（exclusive=1 独占, exclusive=0 共享）
+// 返回 NULL 表示此模式不可用
+HWClock*    hwclock_create(int sample_rate, int channels,
+                            int bits, int exclusive);
+
+// 写入音频数据并关联 PTS
+int         hwclock_write(HWClock* clk, const uint8_t* pcm,
+                           int size, double pts);
+
+// 获取当前播放时间（秒），精度 ±0.5ms（独占）/ ±2ms（共享）
+double      hwclock_get_time(HWClock* clk);
+
+// 重置基准点
+void        hwclock_reset(HWClock* clk, double new_pts);
+
+// 清空缓冲
+void        hwclock_flush(HWClock* clk);
+
+// 获取设备延迟（秒）
+double      hwclock_get_latency(HWClock* clk);
+
+// 销毁
+void        hwclock_destroy(HWClock* clk);
+
+#endif
+```
+
+### 4.2 完整实现
+
+```c
+// sync/hw_clock.c
+
+#include "hw_clock.h"
+#include <windows.h>
+#include <audioclient.h>
+#include <mmdeviceapi.h>
+#include <functiondiscoverykeys_devpkey.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#pragma comment(lib, "ole32.lib")
+
+struct HWClock {
+    IAudioClient*        client;
+    IAudioClock*         clock;
+    IAudioRenderClient*  renderer;
+
+    // 设备参数
+    UINT32   buffer_frames;     // 缓冲区总帧数
+    UINT64   device_freq;       // 采样率（时钟频率）
+    double   latency;           // 设备报告延迟（秒）
+    int      channels;
+    int      bits;
+    int      is_exclusive;
+
+    // 基准对齐
+    double   pts_base;          // 基准 PTS
+    double   device_base;       // 基准 device_time
+
+    // 线程安全
+    CRITICAL_SECTION lock;
+    volatile int running;
+};
+
+// ============================================================
+// 创建
+// ============================================================
+HWClock* hwclock_create(int sample_rate, int channels, int bits, int exclusive) {
+    HWClock* clk = calloc(1, sizeof(HWClock));
+    clk->channels = channels;
+    clk->bits = bits;
+    InitializeCriticalSection(&clk->lock);
+
+    // 获取默认音频设备
+    IMMDeviceEnumerator* enumerator = NULL;
+    IMMDevice* device = NULL;
+
+    HRESULT hr = CoCreateInstance(
+        &CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
+        &IID_IMMDeviceEnumerator, (void**)&enumerator);
+    if (FAILED(hr)) goto fail;
+
+    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+    enumerator->Release();
+    if (FAILED(hr)) goto fail;
+
+    // 创建 AudioClient
+    hr = device->Activate(&IID_IAudioClient, CLSCTX_ALL, NULL,
+                           (void**)&clk->client);
+    device->Release();
+    if (FAILED(hr)) goto fail;
+
+    // 获取混合格式
+    WAVEFORMATEX* fmt = NULL;
+    hr = clk->client->GetMixFormat(&fmt);
+    if (FAILED(hr)) goto fail;
+
+    // 询问是否支持目标格式
+    WAVEFORMATEX* closest = NULL;
+    hr = clk->client->IsFormatSupported(
+        exclusive ? AUDCLNT_SHAREMODE_EXCLUSIVE : AUDCLNT_SHAREMODE_SHARED,
+        fmt, &closest);
+
+    if (hr == S_FALSE && closest) {
+        // 使用推荐格式
+        CoTaskMemFree(fmt);
+        fmt = closest;
+        closest = NULL;
+    }
+    else if (FAILED(hr)) {
+        CoTaskMemFree(fmt);
+        goto fail;
+    }
+
+    // 设置缓冲参数
+    REFERENCE_TIME buffer_dur, period_dur;
+    if (exclusive) {
+        buffer_dur = 30000;   // 3ms
+        period_dur = 30000;
+    } else {
+        buffer_dur = 100000;  // 10ms
+        period_dur = 0;       // 共享模式下 0 表示让系统决定
+    }
+
+    DWORD flags = exclusive ? AUDCLNT_STREAMFLAGS_EVENTCALLBACK : 0;
+
+    hr = clk->client->Initialize(
+        exclusive ? AUDCLNT_SHAREMODE_EXCLUSIVE : AUDCLNT_SHAREMODE_SHARED,
+        flags, buffer_dur, period_dur, fmt, NULL);
+
+    if (FAILED(hr)) {
+        CoTaskMemFree(fmt);
+        goto fail;
+    }
+
+    // 获取设备属性
+    clk->client->GetBufferSize(&clk->buffer_frames);
+    clk->device_freq = fmt->nSamplesPerSec;
+
+    REFERENCE_TIME stream_latency;
+    clk->client->GetStreamLatency(&stream_latency);
+    clk->latency = stream_latency / 10000000.0;
+
+    CoTaskMemFree(fmt);
+
+    // 获取服务接口
+    hr = clk->client->GetService(&IID_IAudioClock, (void**)&clk->clock);
+    if (FAILED(hr)) goto fail;
+
+    hr = clk->client->GetService(&IID_IAudioRenderClient, (void**)&clk->renderer);
+    if (FAILED(hr)) goto fail;
+
+    clk->is_exclusive = exclusive;
+
+    // 设置初始基准
+    hwclock_reset(clk, 0.0);
+
+    // 启动
+    clk->client->Start();
+    clk->running = 1;
+
+    return clk;
+
+fail:
+    hwclock_destroy(clk);
+    return NULL;
+}
+
+// ============================================================
+// 获取当前播放时间（核心）
+// ============================================================
+double hwclock_get_time(HWClock* clk) {
+    if (!clk->running || !clk->clock) return -1.0;
+
+    EnterCriticalSection(&clk->lock);
+
+    UINT64 device_pos = 0;   // 声卡已播放的采样数
+    UINT64 qpc = 0;          // 对应的 QPC 时间戳
+
+    clk->clock->GetPosition(&device_pos, &qpc);
+
+    // 已播放秒数（从设备启动算起）
+    double device_time = (double)device_pos / (double)clk->device_freq;
+
+    // 声卡缓冲中已写入但尚未播放的帧数
+    UINT32 padding = 0;
+    clk->client->GetCurrentPadding(&padding);
+    double hw_delay = (double)padding / (double)clk->device_freq;
+
+    /*
+     * 计算公式：
+     *
+     *   result = pts_base + (device_time - device_base) - hw_delay
+     *
+     *   含义：
+     *     pts_base           → 基准时间点的 PTS 值
+     *     device_time        → 声卡当前播放到的设备时间
+     *     device_base        → 基准时间点的设备时间
+     *     (device_time - device_base) → 从基准点到现在过去了多少秒
+     *     hw_delay           → 缓冲区中还未播放的延迟
+     *
+     *   简化理解：
+     *     当前音频 PTS = 基准 PTS + 声卡走过的秒数 - 还没播的延迟
+     */
+    double result = clk->pts_base + (device_time - clk->device_base) - hw_delay;
+
+    LeaveCriticalSection(&clk->lock);
+    return result;
+}
+
+// ============================================================
+// 写入音频数据
+// ============================================================
+int hwclock_write(HWClock* clk, const uint8_t* pcm, int size, double pts) {
+    if (!clk->running) return -1;
+
+    int frame_bytes = clk->channels * clk->bits / 8;
+    int total_frames = size / frame_bytes;
+    int offset = 0;
+
+    while (total_frames > 0 && clk->running) {
+        // 获取可写帧数
+        UINT32 padding = 0;
+        clk->client->GetCurrentPadding(&padding);
+        UINT32 available = clk->buffer_frames - padding;
+
+        if (available == 0) {
+            // 缓冲满，等待
+            Sleep(1);
+            continue;
+        }
+
+        if ((int)available > total_frames)
+            available = total_frames;
+
+        // 获取缓冲区指针
+        BYTE* buf = NULL;
+        clk->renderer->GetBuffer(available, &buf);
+
+        // 拷贝数据
+        int copy_bytes = available * frame_bytes;
+        memcpy(buf, pcm + offset, copy_bytes);
+
+        // 释放缓冲
+        clk->renderer->ReleaseBuffer(available, 0);
+
+        // 更新基准点：当前 PTS 对应当前声卡位置
+        // （每次写入都更新，这样 seek 后自动对齐）
+        EnterCriticalSection(&clk->lock);
+        UINT64 dev_pos, qpc;
+        clk->clock->GetPosition(&dev_pos, &qpc);
+        UINT32 pad2 = 0;
+        clk->client->GetCurrentPadding(&pad2);
+
+        clk->device_base = (double)dev_pos / (double)clk->device_freq;
+        // PTS 基准 = 当前帧 PTS + 缓冲延迟（写入点超前于播放点）
+        clk->pts_base = pts + (double)(pad2) / (double)clk->device_freq;
+        LeaveCriticalSection(&clk->lock);
+
+        offset += copy_bytes;
+        total_frames -= available;
+        pts += (double)available / (double)clk->device_freq;
+    }
+
+    return 0;
+}
+
+// ============================================================
+// 重置基准点
+// ============================================================
+void hwclock_reset(HWClock* clk, double new_pts) {
+    if (!clk->clock) return;
+
+    EnterCriticalSection(&clk->lock);
+
+    UINT64 dev_pos, qpc;
+    clk->clock->GetPosition(&dev_pos, &qpc);
+
+    clk->device_base = (double)dev_pos / (double)clk->device_freq;
+    clk->pts_base = new_pts;
+
+    LeaveCriticalSection(&clk->lock);
+}
+
+// ============================================================
+// 清空缓冲
+// ============================================================
+void hwclock_flush(HWClock* clk) {
+    if (!clk->client) return;
+
+    // 停止 → 重置 → 清空 → 重启
+    clk->client->Stop();
+    clk->client->Reset();
+
+    // 清空残留缓冲
+    UINT32 padding = 0;
+    clk->client->GetCurrentPadding(&padding);
+    if (padding > 0) {
+        BYTE* buf = NULL;
+        clk->renderer->GetBuffer(padding, &buf);
+        memset(buf, 0, padding * clk->channels * clk->bits / 8);
+        clk->renderer->ReleaseBuffer(padding, 0);
+    }
+
+    hwclock_reset(clk, 0.0);
+    clk->client->Start();
+}
+
+// ============================================================
+// 获取延迟
+// ============================================================
+double hwclock_get_latency(HWClock* clk) {
+    return clk->latency;
+}
+
+// ============================================================
+// 销毁
+// ============================================================
+void hwclock_destroy(HWClock* clk) {
+    if (!clk) return;
+    clk->running = 0;
+    if (clk->client) clk->client->Stop();
+    if (clk->renderer) clk->renderer->Release();
+    if (clk->clock) clk->clock->Release();
+    if (clk->client) clk->client->Release();
+    DeleteCriticalSection(&clk->lock);
+    free(clk);
+}
+```
+
+---
+
+## 5. waveOut 软件时钟
+
+### 5.1 接口定义
+
+```c
+// sync/wo_clock.h
+
+#ifndef WO_CLOCK_H
+#define WO_CLOCK_H
+
+#include <stdint.h>
+
+typedef struct WOClock WOClock;
+
+WOClock*    woclock_create(int sample_rate, int channels, int bits);
+int         woclock_write(WOClock* clk, const uint8_t* pcm, int size, double pts);
+double      woclock_get_time(WOClock* clk);
+void        woclock_reset(WOClock* clk, double new_pts);
+void        woclock_flush(WOClock* clk);
+double      woclock_get_latency(WOClock* clk);
+void        woclock_destroy(WOClock* clk);
+
+#endif
+```
+
+### 5.2 完整实现
+
+```c
+// sync/wo_clock.c
+
+#include "wo_clock.h"
+#include <windows.h>
+#include <mmsystem.h>
+#include <stdlib.h>
+#include <string.h>
+
+#pragma comment(lib, "winmm.lib")
+
+#define BUF_COUNT   8
+#define BUF_SIZE    4096
+
+struct WOClock {
+    HWAVEOUT    handle;
+    WAVEHDR     headers[BUF_COUNT];
+    uint8_t     buffers[BUF_COUNT][BUF_SIZE];
+    volatile int write_idx;
+
+    // 时钟参数
+    int         bytes_per_sec;
+    int         channels;
+    int         bits;
+
+    // 基准对齐
+    double      pts_base;           // 基准 PTS
+    DWORD       bytes_base;         // 基准已播放字节
+    volatile int total_bytes_written;// 累计写入字节
+
+    CRITICAL_SECTION lock;
+};
+
+WOClock* woclock_create(int sample_rate, int channels, int bits) {
+    WOClock* clk = calloc(1, sizeof(WOClock));
+    InitializeCriticalSection(&clk->lock);
+
+    clk->channels = channels;
+    clk->bits = bits;
+    clk->bytes_per_sec = sample_rate * channels * (bits / 8);
+
+    WAVEFORMATEX wfx = {0};
+    wfx.wFormatTag      = WAVE_FORMAT_PCM;
+    wfx.nChannels       = channels;
+    wfx.nSamplesPerSec  = sample_rate;
+    wfx.wBitsPerSample  = bits;
+    wfx.nBlockAlign     = channels * bits / 8;
+    wfx.nAvgBytesPerSec = clk->bytes_per_sec;
+
+    MMRESULT mr = waveOutOpen(&clk->handle, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL);
+    if (mr != MMSYSERR_NOERROR) {
+        free(clk);
+        return NULL;
+    }
+
+    for (int i = 0; i < BUF_COUNT; i++) {
+        clk->headers[i].lpData         = (LPSTR)clk->buffers[i];
+        clk->headers[i].dwBufferLength = BUF_SIZE;
+        clk->headers[i].dwFlags        = WHDR_DONE;
+        waveOutPrepareHeader(clk->handle, &clk->headers[i], sizeof(WAVEHDR));
+    }
+
+    woclock_reset(clk, 0.0);
+    return clk;
+}
+
+// ============================================================
+// 获取当前播放时间
+// ============================================================
+double woclock_get_time(WOClock* clk) {
+    EnterCriticalSection(&clk->lock);
+
+    MMTIME mmtime;
+    mmtime.wType = TIME_BYTES;
+    waveOutGetPosition(clk->handle, &mmtime, sizeof(MMTIME));
+
+    // 已播放字节 → 已播放秒数
+    double played_sec = (double)(mmtime.u.cb - clk->bytes_base)
+                        / (double)clk->bytes_per_sec;
+
+    // 加上基准 PTS
+    double result = clk->pts_base + played_sec;
+
+    // 减去缓冲延迟（waveOut 内部的排队延迟）
+    // 简化估算：未播放的字节 / 每秒字节
+    int queued_bytes = clk->total_bytes_written - (int)mmtime.u.cb;
+    if (queued_bytes < 0) queued_bytes = 0;
+    double queue_delay = (double)queued_bytes / (double)clk->bytes_per_sec;
+
+    result -= queue_delay;
+
+    LeaveCriticalSection(&clk->lock);
+    return result;
+}
+
+// ============================================================
+// 写入音频数据
+// ============================================================
+int woclock_write(WOClock* clk, const uint8_t* pcm, int size, double pts) {
+    EnterCriticalSection(&clk->lock);
+
+    int written = 0;
+    while (written < size) {
+        // 等待缓冲区空闲
+        while (!(clk->headers[clk->write_idx].dwFlags & WHDR_DONE))
+            Sleep(2);
+
+        int copy = size - written;
+        if (copy > BUF_SIZE) copy = BUF_SIZE;
+
+        memcpy(clk->buffers[clk->write_idx], pcm + written, copy);
+        clk->headers[clk->write_idx].dwBufferLength = copy;
+        clk->headers[clk->write_idx].dwFlags &= ~WHDR_DONE;
+        waveOutWrite(clk->handle, &clk->headers[clk->write_idx], sizeof(WAVEHDR));
+
+        // 更新基准点
+        clk->total_bytes_written += copy;
+
+        // 更新 PTS 基准
+        MMTIME mt;
+        mt.wType = TIME_BYTES;
+        waveOutGetPosition(clk->handle, &mt, sizeof(MMTIME));
+        clk->bytes_base = mt.u.cb;
+        clk->pts_base = pts;
+
+        written += copy;
+        pts += (double)copy / (double)clk->bytes_per_sec;
+
+        clk->write_idx = (clk->write_idx + 1) % BUF_COUNT;
+    }
+
+    LeaveCriticalSection(&clk->lock);
+    return 0;
+}
+
+// ============================================================
+// 重置
+// ============================================================
+void woclock_reset(WOClock* clk, double new_pts) {
+    EnterCriticalSection(&clk->lock);
+
+    MMTIME mt;
+    mt.wType = TIME_BYTES;
+    waveOutGetPosition(clk->handle, &mt, sizeof(MMTIME));
+
+    clk->bytes_base = mt.u.cb;
+    clk->pts_base = new_pts;
+
+    LeaveCriticalSection(&clk->lock);
+}
+
+// ============================================================
+// 清空缓冲
+// ============================================================
+void woclock_flush(WOClock* clk) {
+    EnterCriticalSection(&clk->lock);
+
+    waveOutReset(clk->handle);
+
+    for (int i = 0; i < BUF_COUNT; i++) {
+        clk->headers[i].dwFlags = WHDR_DONE;
+        clk->headers[i].dwBufferLength = BUF_SIZE;
+    }
+    clk->write_idx = 0;
+    clk->total_bytes_written = 0;
+
+    MMTIME mt;
+    mt.wType = TIME_BYTES;
+    waveOutGetPosition(clk->handle, &mt, sizeof(MMTIME));
+    clk->bytes_base = mt.u.cb;
+
+    LeaveCriticalSection(&clk->lock);
+}
+
+// ============================================================
+// 获取延迟
+// ============================================================
+double woclock_get_latency(WOClock* clk) {
+    // waveOut 典型延迟 = 缓冲区数量 × 每个缓冲区的时长
+    // = 8 × (4096 / bytes_per_sec)
+    return (double)(BUF_COUNT * BUF_SIZE) / (double)clk->bytes_per_sec;
+}
+
+// ============================================================
+// 销毁
+// ============================================================
+void woclock_destroy(WOClock* clk) {
+    if (!clk) return;
+    waveOutReset(clk->handle);
+    for (int i = 0; i < BUF_COUNT; i++)
+        waveOutUnprepareHeader(clk->handle, &clk->headers[i], sizeof(WAVEHDR));
+    waveOutClose(clk->handle);
+    DeleteCriticalSection(&clk->lock);
+    free(clk);
+}
+```
+
+---
+
+## 6. 同步决策引擎
+
+### 6.1 接口定义
+
+```c
+// sync/sync.h
+
+#ifndef SYNC_H
+#define SYNC_H
+
+#include "audio_clock.h"
+
+// ============================================================
+// 同步决策结果
+// ============================================================
+typedef enum {
+    SYNC_RENDER,    // 立即渲染此帧
+    SYNC_WAIT,      // 等待指定毫秒后渲染
+    SYNC_DROP       // 丢弃此帧（视频太落后）
+} SyncAction;
+
+typedef struct {
+    SyncAction action;
+    int        wait_ms;       // 仅 SYNC_WAIT 时有效
+    double     diff_ms;       // 视频与音频的偏差（毫秒，用于调试）
+} SyncDecision;
+
+// ============================================================
+// 同步器句柄
+// ============================================================
+typedef struct SyncContext SyncContext;
+
+// ============================================================
+// 墙钟（纯视频流时备用）
+// ============================================================
+typedef struct {
+    int64_t     start_qpc;      // 播放开始的 QPC
+    double      start_pts;      // 播放开始的 PTS
+    double      speed;          // 播放速度（1.0 = 正常）
+    LARGE_INTEGER qpc_freq;
+} WallClock;
+
+// ============================================================
+// 接口
+// ============================================================
+
+// 创建同步上下文
+SyncContext*    sync_create(AudioClock* aclock);
+
+// 获取墙钟（纯视频时使用）
+void            sync_init_wallclock(SyncContext* ctx);
+
+// 视频帧同步决策
+SyncDecision    sync_video(SyncContext* ctx, double video_pts);
+
+// 音频帧写入（内部更新音频时钟）
+int             sync_audio_write(SyncContext* ctx,
+                                  const uint8_t* pcm, int size, double pts);
+
+// Seek 重置
+void            sync_seek(SyncContext* ctx, double target);
+
+// 获取当前主时钟时间
+double          sync_get_clock(SyncContext* ctx);
+
+// 销毁
+void            sync_destroy(SyncContext* ctx);
+
+#endif // SYNC_H
+```
+
+### 6.2 完整实现
+
+```c
+// sync/sync.c
+
+#include "sync.h"
+#include "precise_sleep.h"
+#include "sync_debug.h"
+#include <windows.h>
+#include <math.h>
+#include <stdlib.h>
+
+struct SyncContext {
+    AudioClock*  aclock;
+    WallClock    wall;
+    int          has_audio;
+
+    // 同步参数（根据音频模式自动设置）
+    double       sync_window;     // 同步窗口（秒）
+    double       drop_threshold;  // 丢帧阈值（秒）
+    double       wait_limit;      // 最大等待时间（秒）
+
+    // 统计
+    int          stat_drops;      // 累计丢帧数
+    int          stat_frames;     // 累计渲染帧数
+};
+
+SyncContext* sync_create(AudioClock* aclock) {
+    SyncContext* ctx = calloc(1, sizeof(SyncContext));
+    ctx->aclock = aclock;
+    ctx->has_audio = (aclock_get_mode(aclock) != AUDIO_CLOCK_NONE);
+
+    // 根据音频模式设置同步参数
+    double window = aclock_get_sync_window(aclock);
+
+    ctx->sync_window    = window;          // ±10ms / ±20ms / ±40ms
+    ctx->drop_threshold = window * 5;      // 丢帧阈值 = 窗口 × 5
+    ctx->wait_limit     = 0.200;           // 最大等待 200ms
+
+    return ctx;
+}
+
+// ============================================================
+// 墙钟初始化（纯视频流备用）
+// ============================================================
+void sync_init_wallclock(SyncContext* ctx) {
+    QueryPerformanceFrequency(&ctx->wall.qpc_freq);
+    QueryPerformanceCounter((LARGE_INTEGER*)&ctx->wall.start_qpc);
+    ctx->wall.start_pts = 0.0;
+    ctx->wall.speed = 1.0;
+}
+
+static double wallclock_get(SyncContext* ctx) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double elapsed = (double)(now.QuadPart - ctx->wall.start_qpc)
+                     / (double)ctx->wall.qpc_freq.QuadPart;
+    return ctx->wall.start_pts + elapsed * ctx->wall.speed;
+}
+
+// ============================================================
+// 获取主时钟
+// ============================================================
+double sync_get_clock(SyncContext* ctx) {
+    if (ctx->has_audio) {
+        return aclock_get_time(ctx->aclock);
+    } else {
+        return wallclock_get(ctx);
+    }
+}
+
+// ============================================================
+// 视频同步决策（核心算法）
+// ============================================================
+SyncDecision sync_video(SyncContext* ctx, double video_pts) {
+    SyncDecision decision;
+    double master = sync_get_clock(ctx);
+    double diff = video_pts - master;
+
+    // 记录调试信息
+    sync_debug_log(video_pts, master, diff * 1000.0);
+
+    decision.diff_ms = diff * 1000.0;
+    ctx->stat_frames++;
+
+    /*
+     * diff 的含义：
+     *
+     *   diff > 0 : 视频在音频前面（视频领先），需要等待
+     *   diff < 0 : 视频在音频后面（视频落后），需要追赶
+     *   diff ≈ 0 : 同步正常
+     *
+     *   ┌──────────────────────────────────────────────────┐
+     *   │           主时钟(音频)位置                         │
+     *   │               ↓                                  │
+     *   │  ────────────┼──────────────────────→ 时间轴      │
+     *   │   -drop      │-window  0  +window   +limit       │
+     *   │    丢帧      │  追     OK    等      等(上限)     │
+     *   └──────────────────────────────────────────────────┘
+     */
+
+    if (diff < -ctx->drop_threshold) {
+        // 视频严重落后：丢帧追赶
+        decision.action = SYNC_DROP;
+        ctx->stat_drops++;
+    }
+    else if (diff < -ctx->sync_window) {
+        // 视频轻微落后：不等待，立即渲染（追赶）
+        decision.action = SYNC_RENDER;
+    }
+    else if (diff < ctx->sync_window) {
+        // 同步窗口内：正常渲染
+        decision.action = SYNC_RENDER;
+    }
+    else if (diff < ctx->wait_limit) {
+        // 视频领先：精确等待
+        decision.action = SYNC_WAIT;
+        decision.wait_ms = (int)(diff * 1000.0);
+    }
+    else {
+        // 视频严重领先：上限等待
+        decision.action = SYNC_WAIT;
+        decision.wait_ms = (int)(ctx->wait_limit * 1000.0);
+    }
+
+    return decision;
+}
+
+// ============================================================
+// 音频写入
+// ============================================================
+int sync_audio_write(SyncContext* ctx, const uint8_t* pcm, int size, double pts) {
+    return aclock_write(ctx->aclock, pcm, size, pts);
+}
+
+// ============================================================
+// Seek 重置
+// ============================================================
+void sync_seek(SyncContext* ctx, double target) {
+    aclock_flush(ctx->aclock);
+    aclock_reset(ctx->aclock, target);
+
+    if (!ctx->has_audio) {
+        ctx->wall.start_pts = target;
+        QueryPerformanceCounter((LARGE_INTEGER*)&ctx->wall.start_qpc);
+    }
+
+    // 重置统计
+    ctx->stat_drops = 0;
+    ctx->stat_frames = 0;
+}
+
+// ============================================================
+// 销毁
+// ============================================================
+void sync_destroy(SyncContext* ctx) {
+    if (!ctx) return;
+    sync_debug_close();
+    // aclock 的生命周期由外部管理，这里不销毁
+    free(ctx);
+}
+```
+
+---
+
+## 7. 高精度等待
+
+```c
+// sync/precise_sleep.h
+
+#ifndef PRECISE_SLEEP_H
+#define PRECISE_SLEEP_H
+
+// 初始化（设置系统定时器精度）
+void    precise_sleep_init(void);
+
+// 高精度等待（秒），精度 ±0.5ms
+void    precise_sleep(double seconds);
+
+// 清理（恢复系统定时器精度）
+void    precise_sleep_cleanup(void);
+
+#endif
+```
+
+```c
+// sync/precise_sleep.c
+
+#include "precise_sleep.h"
+#include <windows.h>
+
+static LARGE_INTEGER g_freq;
+static int g_initialized = 0;
+
+void precise_sleep_init(void) {
+    if (g_initialized) return;
+
+    QueryPerformanceFrequency(&g_freq);
+
+    // 将系统定时器精度设为 1ms（影响 Sleep 函数精度）
+    // 默认精度约 15ms，设为 1ms 后 Sleep 精度可达 ~1ms
+    timeBeginPeriod(1);
+
+    g_initialized = 1;
+}
+
+void precise_sleep(double seconds) {
+    if (!g_initialized) precise_sleep_init();
+
+    if (seconds <= 0.0) return;
+
+    LARGE_INTEGER start, now;
+    QueryPerformanceCounter(&start);
+    int64_t target_ticks = (int64_t)(seconds * g_freq.QuadPart);
+
+    // 策略：先 Sleep 大部分时间，最后 2ms 自旋等待
+    // 这样 CPU 占用低，精度也高
+
+    // 阶段一：Sleep（精度 ±1ms，CPU 占用低）
+    int sleep_ms = (int)(seconds * 1000.0) - 2;
+    if (sleep_ms > 0) {
+        Sleep(sleep_ms);
+    }
+
+    // 阶段二：自旋等待（精度 ±0.01ms，CPU 占用高但只持续很短时间）
+    do {
+        QueryPerformanceCounter(&now);
+    } while ((now.QuadPart - start.QuadPart) < target_ticks);
+}
+
+void precise_sleep_cleanup(void) {
+    if (g_initialized) {
+        timeEndPeriod(1);
+        g_initialized = 0;
+    }
+}
+```
+
+---
+
+## 8. 调试日志
+
+```c
+// sync/sync_debug.h
+
+#ifndef SYNC_DEBUG_H
+#define SYNC_DEBUG_H
+
+#ifdef SYNC_DEBUG_ENABLED
+
+void    sync_debug_open(const char* filename);
+void    sync_debug_log(double video_pts, double audio_clk, double diff_ms);
+void    sync_debug_close(void);
+
+#else
+
+#define sync_debug_open(f)      ((void)0)
+#define sync_debug_log(v,a,d)   ((void)0)
+#define sync_debug_close()      ((void)0)
+
+#endif
+
+#endif
+```
+
+```c
+// sync/sync_debug.c
+
+#ifdef SYNC_DEBUG_ENABLED
+
+#include "sync_debug.h"
+#include <windows.h>
+#include <stdio.h>
+
+static FILE* g_log = NULL;
+static LARGE_INTEGER g_freq, g_start;
+static int g_init = 0;
+
+void sync_debug_open(const char* filename) {
+    g_log = fopen(filename, "w");
+    if (g_log) {
+        fprintf(g_log, "wall_time,video_pts,audio_clk,diff_ms,action\n");
+        QueryPerformanceFrequency(&g_freq);
+        QueryPerformanceCounter(&g_start);
+        g_init = 1;
+    }
+}
+
+void sync_debug_log(double video_pts, double audio_clk, double diff_ms) {
+    if (!g_log || !g_init) return;
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double wall = (double)(now.QuadPart - g_start.QuadPart) / g_freq.QuadPart;
+
+    const char* action = "OK";
+    if (diff_ms < -100)      action = "DROP";
+    else if (diff_ms < -10)  action = "CHASE";
+    else if (diff_ms > 10)   action = "WAIT";
+
+    fprintf(g_log, "%.4f,%.4f,%.4f,%.1f,%s\n",
+            wall, video_pts, audio_clk, diff_ms, action);
+
+    // 每 100 帧刷新一次（减少 I/O 开销）
+    static int count = 0;
+    if (++count % 100 == 0) fflush(g_log);
+}
+
+void sync_debug_close(void) {
+    if (g_log) { fclose(g_log); g_log = NULL; }
+}
+
+#endif
+```
+
+---
+
+## 9. 在播放引擎中的集成
+
+```c
+// core/player.c（同步相关部分）
+
+#include "sync/sync.h"
+#include "sync/precise_sleep.h"
+#include "media/media_source.h"
+#include "video_out/video_out.h"
+#include <windows.h>
+
+typedef struct Player {
+    HWND            hwnd;
+    MediaSource*    source;
+    AudioClock*     aclock;
+    SyncContext*    sync;
+    VideoOut*       vo;
+
+    volatile int    state;
+    volatile int    running;
+    HANDLE          thread;
+
+    // 视频帧缓冲
+    uint8_t*        frame_buf;
+    int             frame_w, frame_h;
+    int             frame_ready;
+    CRITICAL_SECTION frame_lock;
+
+    // 纯视频时的墙钟
+    int             has_audio;
+} Player;
+
+// ============================================================
+// 创建并初始化
+// ============================================================
+Player* player_create(HWND hwnd, const wchar_t* url) {
+    Player* p = calloc(1, sizeof(Player));
+    p->hwnd = hwnd;
+    InitializeCriticalSection(&p->frame_lock);
+
+    // 打开媒体源
+    p->source = media_open(url);
+    if (!p->source) goto fail;
+
+    // 初始化同步上下文
+    AudioClockConfig acfg = {0};
+    if (media_has_audio(p->source)) {
+        AudioInfo ai;
+        media_get_audio_info(p->source, &ai);
+        acfg.sample_rate     = ai.sample_rate;
+        acfg.channels        = ai.channels;
+        acfg.bits_per_sample = ai.bits_per_sample;
+        acfg.prefer_exclusive = 1;
+        p->has_audio = 1;
+    }
+
+    p->aclock = aclock_create(&acfg);
+    p->sync = sync_create(p->aclock);
+
+    // 纯视频：初始化墙钟
+    if (!p->has_audio) {
+        sync_init_wallclock(p->sync);
+    }
+
+    // 初始化高精度等待
+    precise_sleep_init();
+
+    // 初始化视频输出
+    VideoInfo vi;
+    if (media_get_video_info(p->source, &vi)) {
+        p->frame_w = vi.width;
+        p->frame_h = vi.height;
+        p->frame_buf = malloc(vi.width * vi.height * 4);
+        p->vo = vo_create(hwnd, vi.width, vi.height);
+    }
+
+    // 打开调试日志（仅调试版）
+    sync_debug_open("sync_debug.csv");
+
+    return p;
+
+fail:
+    free(p);
+    return NULL;
+}
+
+// ============================================================
+// 解码线程
+// ============================================================
+static DWORD WINAPI decode_thread(LPVOID arg) {
+    Player* p = (Player*)arg;
+    MediaFrame frame = {0};
+    int consecutive_drops = 0;
+
+    while (p->running && media_read(p->source, &frame) > 0) {
+        // 暂停等待
+        while (p->state == STATE_PAUSED && p->running)
+            Sleep(10);
+
+        if (!p->running) break;
+
+        if (frame.type == 1) {
+            // ======== 视频帧 ========
+            SyncDecision sd = sync_video(p->sync, frame.timestamp);
+
+            switch (sd.action) {
+                case SYNC_DROP:
+                    consecutive_drops++;
+                    if (consecutive_drops > 60) {
+                        // 连续丢帧过多，可能时钟出问题
+                        consecutive_drops = 0;
+                    }
+                    media_free_frame(&frame);
+                    continue;
+
+                case SYNC_WAIT:
+                    consecutive_drops = 0;
+                    if (sd.wait_ms > 0)
+                        precise_sleep(sd.wait_ms / 1000.0);
+                    break;
+
+                case SYNC_RENDER:
+                    consecutive_drops = 0;
+                    break;
+            }
+
+            // 更新帧缓冲
+            EnterCriticalSection(&p->frame_lock);
+            memcpy(p->frame_buf, frame.data, frame.size);
+            p->frame_ready = 1;
+            LeaveCriticalSection(&p->frame_lock);
+
+            // 通知重绘
+            InvalidateRect(p->hwnd, NULL, FALSE);
+
+        } else {
+            // ======== 音频帧 ========
+            sync_audio_write(p->sync, frame.data, frame.size,
+                              frame.timestamp);
+        }
+
+        media_free_frame(&frame);
+    }
+
+    return 0;
+}
+
+// ============================================================
+// Seek
+// ============================================================
+void player_seek(Player* p, double target) {
+    int old_state = p->state;
+    p->state = STATE_PAUSED;
+    Sleep(50);
+
+    // 重置同步器（清空缓冲 + 重置时钟）
+    sync_seek(p->sync, target);
+
+    // 媒体源 seek
+    media_seek(p->source, target);
+
+    // 清空视频帧缓冲
+    EnterCriticalSection(&p->frame_lock);
+    p->frame_ready = 0;
+    LeaveCriticalSection(&p->frame_lock);
+
+    p->state = old_state;
+}
+
+// ============================================================
+// 渲染（主线程 WM_PAINT 调用）
+// ============================================================
+void player_paint(Player* p, HDC hdc, int win_w, int win_h) {
+    EnterCriticalSection(&p->frame_lock);
+    if (p->frame_ready && p->frame_buf) {
+        vo_render(p->vo, p->frame_buf, p->frame_w, p->frame_h);
+    } else {
+        RECT rc = {0, 0, win_w, win_h};
+        FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    }
+    LeaveCriticalSection(&p->frame_lock);
+}
+```
+
+---
+
+## 10. 完整数据流时序图
+
+```
+时间 →
+
+解码线程:  READ─V──READ─A──READ─V──READ─A──READ─V──READ─A──
+               │        │        │        │        │
+               ▼        │        ▼        │        ▼
+         sync_video()   │  sync_video()   │  sync_video()
+         diff=+8ms      │  diff=-25ms     │  diff=+15ms
+         → RENDER       │  → RENDER(追)   │  → WAIT 15ms
+               │        │        │        │        │
+               ▼        ▼        ▼        ▼        ▼
+帧缓冲:   [更新帧1]          [更新帧2]          [更新帧3]
+
+音频时钟:       │ aclock_update  │ aclock_update  │ aclock_update
+                │ PTS=1.000     │ PTS=1.033      │ PTS=1.066
+                ▼               ▼                ▼
+音频输出:  [播放PCM]     [播放PCM]       [播放PCM]      [播放PCM]
+           声卡持续恒速播放，时钟根据声卡硬件位置精确更新
+
+主线程:    ──PAINT──PAINT──PAINT──PAINT──PAINT──PAINT──
+               ↑              ↑              ↑
+           显示帧1         显示帧2        显示帧3
+           (刚好在音频     (追上后立即    (等待 15ms
+            同步窗口内)     渲染)          后渲染)
+```
+
+---
+
+## 11. 编译配置
+
+```cmake
+# CMakeLists.txt 中添加同步模块
+
+set(SYNC_SOURCES
+    src/sync/audio_clock.c
+    src/sync/hw_clock.c
+    src/sync/wo_clock.c
+    src/sync/sync.c
+    src/sync/precise_sleep.c
+    src/sync/sync_debug.c
+)
+
+add_executable(MiniPlayer WIN32
+    src/main.c
+    src/core/player.c
+    src/media/media_source.c
+    src/video_out/vo_gdi.c
+    ${SYNC_SOURCES}
+)
+
+# 同步模块额外链接的库
+target_link_libraries(MiniPlayer PRIVATE
+    user32 gdi32 ole32 winmm
+    mf mfplat mfreadwrite mfuuid uuid shlwapi
+)
+
+# 调试版开启同步日志
+target_compile_definitions(MiniPlayer PRIVATE
+    $<$<CONFIG:Debug>:SYNC_DEBUG_ENABLED>
+)
+```
+
+---
+
+## 12. 版本演进对照
+
+```
+                 v0.1                 v0.2                  v0.4
+────────────────────────────────────────────────────────────────────
+音频输出      waveOut              waveOut               WASAPI 独占
+时钟精度      ±15ms               ±5ms                   ±0.5ms
+同步窗口      ±40ms               ±20ms                  ±10ms
+音频时钟      帧 PTS              PTS + GetPosition      硬件 IAudioClock
+等待精度      Sleep(毫秒)          Sleep(毫秒)             precise_sleep
+丢帧阈值      200ms               100ms                   50ms
+新增文件      wo_clock.c           wo_clock.c             hw_clock.c
+              sync.c               sync.c + sync_debug.c  precise_sleep.c
+              ─────                ─────                   ─────
+代码量增量    ~200 行             +100 行                 +200 行
+```
+
+**每一级都是完整可用的，升级不影响架构，只替换时钟实现和调整参数。**

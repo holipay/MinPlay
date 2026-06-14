@@ -344,7 +344,6 @@ void vo_render(VideoOut* vo, const uint8_t* data, int src_w, int src_h, int data
     vo->ctx->lpVtbl->Map(vo->ctx, (ID3D11Resource*)vo->vbuf, 0, D3D11_MAP_WRITE_DISCARD, 0, &vb_map);
     memcpy(vb_map.pData, box, sizeof(box));
     vo->ctx->lpVtbl->Unmap(vo->ctx, (ID3D11Resource*)vo->vbuf, 0);
-    LOG_INFO("d3d: pipeline ready");
 
     if (is_nv12 && vo->ps_nv12) {
         vo->ctx->lpVtbl->PSSetShader(vo->ctx, vo->ps_nv12, NULL, 0);
@@ -364,7 +363,7 @@ void vo_render(VideoOut* vo, const uint8_t* data, int src_w, int src_h, int data
     vo->ctx->lpVtbl->Draw(vo->ctx, 4, 0);
 
     /* Present with no vsync to avoid blocking */
-    HRESULT hr = vo->swap->lpVtbl->Present(vo->swap, 1, 0);
+    HRESULT hr = vo->swap->lpVtbl->Present(vo->swap, 0, 0);
     if (hr == DXGI_STATUS_OCCLUDED) {
         /* Window is not visible, sleep to avoid burning CPU */
         Sleep(10);

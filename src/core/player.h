@@ -32,11 +32,13 @@ int             player_has_audio(Player* p);
 
 void            player_paint(Player* p, HDC hdc, int w, int h);
 void            player_render_d3d(Player* p, int w, int h);
+void            player_video_tick(Player* p);
+void            player_resize(Player* p, int w, int h);
 
 void            player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp);
-void            player_process_audio_frame(Player* p, IMFSample* sample, LONGLONG timestamp);
 void            player_check_audio(Player* p);
 int             player_is_audio_done(Player* p);
 int             player_is_finished(Player* p);
+double          player_get_video_fps(Player* p);
 
 #endif

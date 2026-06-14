@@ -59,6 +59,9 @@ struct AudioOut {
     double speed;
     double resample_frac;
 
+    uint8_t* tmp_buf;
+    int      tmp_buf_size;
+
     volatile LONG64 total_bytes_written;
     double last_write_pts;
     int    last_write_size;
@@ -119,13 +122,16 @@ static void fill_buffer(AudioOut* ao, BYTE* out, int out_frames) {
         in_bytes = avail - (avail % in_fb);
         in_needed = in_bytes / in_fb;
     }
+    if (in_bytes > ao->tmp_buf_size) {
+        in_bytes = ao->tmp_buf_size - (ao->tmp_buf_size % in_fb);
+        in_needed = in_bytes / in_fb;
+    }
     if (in_needed < 2) {
         memset(out_f, 0, out_frames * out_ch * sizeof(float));
         return;
     }
 
-    uint8_t* tmp = (uint8_t*)malloc(in_bytes);
-    if (!tmp) { memset(out_f, 0, out_frames * out_ch * sizeof(float)); return; }
+    uint8_t* tmp = ao->tmp_buf;
     int t = ao->ring_tail;
     int left = in_bytes;
     uint8_t* dst = tmp;
@@ -156,8 +162,6 @@ static void fill_buffer(AudioOut* ao, BYTE* out, int out_frames) {
         pos += ratio;
         written++;
     }
-
-    free(tmp);
 
     int consumed = (int)pos;
     if (consumed > 0 && consumed < in_needed)
@@ -356,6 +360,9 @@ AudioOut* ao_create(int sample_rate, int channels, int bits) {
         free(ao->ring); free(ao); return NULL;
     }
 
+    ao->tmp_buf_size = ao->buffer_frames * 2 * ao->in_frame_bytes;
+    ao->tmp_buf = (uint8_t*)malloc(ao->tmp_buf_size);
+
     ao->playing = 1;
     ao->thread = CreateThread(NULL, 0, playback_thread, ao, 0, NULL);
 
@@ -395,6 +402,10 @@ double ao_get_clock(AudioOut* ao) {
     if (FAILED(ao->clock->lpVtbl->GetPosition(ao->clock, &pos, NULL)))
         return 0;
     return (double)pos / ao->bytes_per_sec;
+}
+
+int ao_is_exclusive(AudioOut* ao) {
+    return ao ? ao->exclusive : 0;
 }
 
 int ao_get_buffered(AudioOut* ao) {
@@ -450,6 +461,7 @@ void ao_destroy(AudioOut* ao) {
     if (ao->render) ao->render->lpVtbl->Release(ao->render);
     if (ao->client) ao->client->lpVtbl->Release(ao->client);
     if (ao->event)  CloseHandle(ao->event);
-    if (ao->ring)   free(ao->ring);
+    if (ao->ring)     free(ao->ring);
+    if (ao->tmp_buf)  free(ao->tmp_buf);
     free(ao);
 }

@@ -7,23 +7,6 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 
-typedef struct {
-    uint8_t*    data;
-    int         size;
-    int         owns_data;
-
-    int         width;
-    int         height;
-    int         stride;
-
-    int         sample_rate;
-    int         channels;
-    int         bits_per_sample;
-
-    double      timestamp;
-    int         type;
-} MediaFrame;
-
 typedef struct MediaSource MediaSource;
 
 typedef struct {
@@ -44,10 +27,6 @@ MediaSource*    media_open(const wchar_t* path_or_url);
 MediaSource*    media_open_with_callback(const wchar_t* path_or_url,
                                           IMFSourceReaderCallback* callback);
 void            media_close(MediaSource* src);
-
-int             media_read_video(MediaSource* src, MediaFrame* frame);
-int             media_read_audio(MediaSource* src, MediaFrame* frame);
-void            media_free_frame(MediaFrame* frame);
 
 int             media_seek(MediaSource* src, double seconds);
 double          media_get_duration(MediaSource* src);

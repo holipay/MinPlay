@@ -3,13 +3,13 @@
 #include <stdio.h>
 #include <mfapi.h>
 #include "core/player.h"
-#include "core/source_reader_callback.h"
 #include "util/log.h"
 
 static Player*      g_player = NULL;
 static HWND         g_hwnd   = NULL;
-#define TIMER_AUDIO_CHECK 1
-#define TIMER_EOF_CHECK   2
+#define TIMER_AUDIO_CHECK   1
+#define TIMER_VIDEO_DISPLAY 2
+#define TIMER_EOF_CHECK     3
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -31,24 +31,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_ERASEBKGND:
             return 1;
 
-        case WM_SIZE:
+        case WM_SIZE: {
+            int nw = LOWORD(lp), nh = HIWORD(lp);
+            if (g_player) player_resize(g_player, nw, nh);
             InvalidateRect(hwnd, NULL, FALSE);
             break;
-
-        case WM_APP_VIDEO_FRAME: {
-            IMFSample* sample = (IMFSample*)wp;
-            LONGLONG timestamp = (LONGLONG)lp;
-            if (g_player)
-                player_process_video_frame(g_player, sample, timestamp);
-            return 0;
-        }
-
-        case WM_APP_AUDIO_FRAME: {
-            IMFSample* sample = (IMFSample*)wp;
-            LONGLONG timestamp = (LONGLONG)lp;
-            if (g_player)
-                player_process_audio_frame(g_player, sample, timestamp);
-            return 0;
         }
 
         case WM_KEYDOWN:
@@ -77,6 +64,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == TIMER_AUDIO_CHECK && g_player)
                 player_check_audio(g_player);
+            if (wp == TIMER_VIDEO_DISPLAY && g_player)
+                player_video_tick(g_player);
             if (wp == TIMER_EOF_CHECK && g_player) {
                 if (player_is_finished(g_player)) {
                     KillTimer(hwnd, TIMER_EOF_CHECK);
@@ -133,22 +122,28 @@ int main(int argc, char* argv[])
 
     player_play(g_player);
     SetTimer(g_hwnd, TIMER_AUDIO_CHECK, 50, NULL);
+    if (player_has_video(g_player)) {
+        double fps = player_get_video_fps(g_player);
+        int period = fps > 0 ? (int)(1000.0 / fps) : 33;
+        if (period < 1) period = 1;
+        SetTimer(g_hwnd, TIMER_VIDEO_DISPLAY, period, NULL);
+    }
     SetTimer(g_hwnd, TIMER_EOF_CHECK, 500, NULL);
+
+    /* Fire an immediate video tick to minimize A/V startup gap */
+    if (player_has_video(g_player))
+        PostMessage(g_hwnd, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
+
     LOG_INFO("Playing: %S", url);
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
-        /* Render D3D11 frame after message processing (not in WM_PAINT) */
-        if (g_player) {
-            RECT rc;
-            GetClientRect(g_hwnd, &rc);
-            player_render_d3d(g_player, rc.right, rc.bottom);
-        }
     }
 
     KillTimer(g_hwnd, TIMER_AUDIO_CHECK);
+    KillTimer(g_hwnd, TIMER_VIDEO_DISPLAY);
     player_close(g_player);
     player_destroy(g_player);
 
