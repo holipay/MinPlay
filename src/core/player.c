@@ -39,6 +39,7 @@ struct Player {
     volatile int    frame_ready;
     int             frame_w;
     int             frame_h;
+    int             frame_size;
     PixelFormat     pix_fmt;
 
     LARGE_INTEGER   perf_freq;
@@ -54,6 +55,11 @@ struct Player {
     HANDLE          vthread;
     volatile int    vthread_running;
     double          paint_frame_ts;
+
+    HDC             back_dc;
+    HBITMAP         back_bm;
+    int             back_w;
+    int             back_h;
 };
 
 static double get_time_sec(Player* p) {
@@ -73,11 +79,10 @@ static DWORD WINAPI video_thread_proc(LPVOID arg) {
         if (p->state != STATE_PLAYING) {
             ResetEvent(p->vq_event);
             WaitForSingleObject(p->vq_event, 100);
-            if (p->has_audio && p->ao) ao_set_speed(p->ao, 1.0);
             continue;
         }
 
-        /* Step 1: Ensure at least one frame in queue */
+        /* Wait for at least one frame in queue */
         for (;;) {
             EnterCriticalSection(&p->vq_lock);
             int has_frames = (p->vq_head != p->vq_tail);
@@ -88,72 +93,91 @@ static DWORD WINAPI video_thread_proc(LPVOID arg) {
             if (!p->vthread_running) return 0;
         }
 
-        /* Get master clock and adjust audio speed */
-        double master = 0;
+        /* Get PTS-based audio clock */
+        double audio_clk = 0;
         if (p->has_audio && p->ao)
-            master = ao_get_clock(p->ao);
-        if (master <= 0.001)
-            master = elapsed_sec(p);
+            audio_clk = ao_get_clock(p->ao);
+        if (audio_clk <= 0.001)
+            audio_clk = elapsed_sec(p);
 
-        /* Step 2: Drop frames that are too late */
+        /* Drop late frames */
         for (;;) {
             EnterCriticalSection(&p->vq_lock);
             int head = p->vq_head;
             int tail = p->vq_tail;
-            if (head == tail) {
-                LeaveCriticalSection(&p->vq_lock);
-                break;
-            }
+            if (head == tail) { LeaveCriticalSection(&p->vq_lock); break; }
             VFrame* f = &p->vq[head];
-            int next = (head + 1) % VQ_SIZE;
-            int has_more = (next != tail);
-            double delay = f->timestamp - master;
-
-            if (delay < -0.1 && has_more) {
-                free(f->data);
-                f->data = NULL;
+            double diff = f->timestamp - audio_clk;
+            int has_more = ((head + 1) % VQ_SIZE != tail);
+            if (diff < -0.100 && has_more) {
+                int next = (head + 1) % VQ_SIZE;
+                free(f->data); f->data = NULL;
                 p->vq_head = next;
                 LeaveCriticalSection(&p->vq_lock);
+                src_cb_consume_video(p->callback);
                 continue;
             }
             LeaveCriticalSection(&p->vq_lock);
             break;
         }
 
-        /* Step 3: Display frame at the right time */
+        /* Display frame or wait */
         {
             EnterCriticalSection(&p->vq_lock);
             int head = p->vq_head;
             int tail = p->vq_tail;
             if (head == tail) {
                 LeaveCriticalSection(&p->vq_lock);
-                if (!src_cb_is_video_eof(p->callback))
-                    src_cb_request_video_read(p->callback);
                 continue;
             }
             VFrame* f = &p->vq[head];
             int size = f->size;
             int next = (head + 1) % VQ_SIZE;
-            double delay = f->timestamp - master;
+            double diff = f->timestamp - audio_clk;
 
-            /* A/V sync: no audio speed adjustment — video thread drops/delays frames instead */
+            int action = 0; /* 0=render, 1=wait, 2=drop */
+            int wait_ms = 0;
 
-            /* Drop frame if too late */
-            if (delay < -0.1 && (head + 1) % VQ_SIZE != tail) {
-                free(f->data);
-                f->data = NULL;
+            if (diff < -0.100) {
+                action = 2; /* too late, drop if more frames */
+            } else if (diff < -0.010) {
+                action = 0; /* slightly late, render now */
+            } else if (diff < 0.010) {
+                action = 0; /* in sync, render now */
+            } else if (diff < 0.500) {
+                action = 1;
+                wait_ms = (int)(diff * 1000);
+            } else {
+                action = 1;
+                wait_ms = 100; /* cap at 100ms */
+            }
+
+            if (action == 2 && (head + 1) % VQ_SIZE != tail) {
+                free(f->data); f->data = NULL;
                 p->vq_head = next;
                 LeaveCriticalSection(&p->vq_lock);
-                if (!src_cb_is_video_eof(p->callback))
-                    src_cb_request_video_read(p->callback);
+                src_cb_consume_video(p->callback);
                 continue;
             }
 
+            if (action == 1) {
+                LeaveCriticalSection(&p->vq_lock);
+                if (wait_ms > 0 && wait_ms < 200) {
+                    ResetEvent(p->vq_event);
+                    WaitForSingleObject(p->vq_event, wait_ms);
+                } else {
+                    Sleep(1);
+                }
+                continue;
+            }
+
+            /* action == 0: render */
             EnterCriticalSection(&p->frame_lock);
             if (p->frame_buf && size <= p->frame_buf_size) {
                 memcpy(p->frame_buf, f->data, size);
                 p->frame_ready = 1;
                 p->paint_frame_ts = f->timestamp;
+                p->frame_size = size;
 
                 IMFMediaType* mt = NULL;
                 IMFSourceReader_GetCurrentMediaType(media_get_reader(p->source),
@@ -168,16 +192,13 @@ static DWORD WINAPI video_thread_proc(LPVOID arg) {
             }
             LeaveCriticalSection(&p->frame_lock);
 
-            free(f->data);
-            f->data = NULL;
+            free(f->data); f->data = NULL;
             p->vq_head = next;
             LeaveCriticalSection(&p->vq_lock);
+            src_cb_consume_video(p->callback);
 
             InvalidateRect(p->hwnd, NULL, FALSE);
         }
-
-        if (!src_cb_is_video_eof(p->callback))
-            src_cb_request_video_read(p->callback);
     }
     return 0;
 }
@@ -269,6 +290,8 @@ void player_close(Player* p) {
 void player_destroy(Player* p) {
     if (!p) return;
     if (p->frame_buf) { free(p->frame_buf); p->frame_buf = NULL; }
+    if (p->back_bm) { DeleteObject(p->back_bm); }
+    if (p->back_dc) DeleteDC(p->back_dc);
     DeleteCriticalSection(&p->frame_lock);
     DeleteCriticalSection(&p->vq_lock);
     if (p->vq_event) { CloseHandle(p->vq_event); p->vq_event = NULL; }
@@ -543,50 +566,17 @@ int player_is_finished(Player* p) {
 }
 
 void player_paint(Player* p, HDC hdc, int w, int h) {
-    if (!p) {
-        RECT rc = {0, 0, w, h};
-        FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
-        return;
-    }
+    /* D3D11 handles rendering — WM_PAINT is a no-op */
+    (void)p; (void)hdc; (void)w;
+}
+
+void player_render_d3d(Player* p, int w, int h) {
+    if (!p || !p->vo) return;
     EnterCriticalSection(&p->frame_lock);
     if (p->frame_ready && p->frame_buf && p->frame_w > 0 && p->frame_h > 0) {
-        HDC memdc = CreateCompatibleDC(hdc);
-        HBITMAP hbm = CreateCompatibleBitmap(hdc, w, h);
-        HBITMAP oldbm = (HBITMAP)SelectObject(memdc, hbm);
-
-        RECT rc_bg = {0, 0, w, h};
-        FillRect(memdc, &rc_bg, (HBRUSH)GetStockObject(BLACK_BRUSH));
-
-        BITMAPINFO bmi = {0};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = p->frame_w;
-        bmi.bmiHeader.biHeight = -p->frame_h;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        double sx = (double)w / p->frame_w;
-        double sy = (double)h / p->frame_h;
-        double s = sx < sy ? sx : sy;
-        int dw = (int)(p->frame_w * s);
-        int dh = (int)(p->frame_h * s);
-        int dx = (w - dw) / 2;
-        int dy = (h - dh) / 2;
-
-        SetStretchBltMode(memdc, HALFTONE);
-        SetBrushOrgEx(memdc, 0, 0, NULL);
-        StretchDIBits(memdc, dx, dy, dw, dh,
-            0, 0, p->frame_w, p->frame_h,
-            p->frame_buf, &bmi, DIB_RGB_COLORS, SRCCOPY);
-
-        BitBlt(hdc, 0, 0, w, h, memdc, 0, 0, SRCCOPY);
-
-        SelectObject(memdc, oldbm);
-        DeleteObject(hbm);
-        DeleteDC(memdc);
-    } else {
-        RECT rc = {0, 0, w, h};
-        FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        vo_resize(p->vo, w, h);
+        vo_render(p->vo, p->frame_buf, p->frame_w, p->frame_h, p->frame_size);
+        p->frame_ready = 0;
     }
     LeaveCriticalSection(&p->frame_lock);
 }

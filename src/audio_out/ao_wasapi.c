@@ -18,6 +18,10 @@ static const IID _IID_IAudioRenderClient_local =
 static const IID _IID_IAudioClock_local =
     {0xCD63314F, 0x3FBA, 0x4A1B, {0x81, 0x2C, 0xEF, 0x96, 0x35, 0x87, 0x28, 0xE7}};
 
+/* PKEY_AudioEngine_DeviceFormat = {f19f064d-082c-4e27-bc73-6882a1981a90}, PID 0 */
+static const PROPERTYKEY _PKEY_AudioEngine_DeviceFormat_local =
+    {{0xf19f064d, 0x082c, 0x4e27, {0xbc,0x73,0x68,0x82,0xa1,0x98,0x1a,0x90}}, 0};
+
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 
@@ -32,6 +36,7 @@ struct AudioOut {
     HANDLE              event;
     HANDLE              thread;
     volatile int        playing;
+    int                 exclusive;
 
     int in_rate;
     int in_channels;
@@ -197,12 +202,6 @@ static DWORD WINAPI playback_thread(LPVOID arg) {
         if (SUCCEEDED(ao->render->lpVtbl->GetBuffer(ao->render, frames, &buf)) && buf) {
             fill_buffer(ao, buf, frames);
             ao->render->lpVtbl->ReleaseBuffer(ao->render, frames, 0);
-            {
-                static int fc = 0;
-                fc++;
-                if (fc % 200 == 0)
-                    LOG_INFO("fill[%d]: ring=%d frames=%d", fc, ring_avail(ao), frames);
-            }
         }
     }
 
@@ -238,28 +237,89 @@ AudioOut* ao_create(int sample_rate, int channels, int bits) {
     if (FAILED(hr)) { LOG_ERROR("GetDefaultAudioEndpoint: 0x%08lX", hr); free(ao->ring); free(ao); return NULL; }
 
     hr = device->lpVtbl->Activate(device, &_IID_IAudioClient_local, CLSCTX_ALL, NULL, (void**)&ao->client);
-    device->lpVtbl->Release(device);
-    if (FAILED(hr)) { LOG_ERROR("IMMDevice_Activate: 0x%08lX", hr); free(ao->ring); free(ao); return NULL; }
+    if (FAILED(hr)) { LOG_ERROR("IMMDevice_Activate: 0x%08lX", hr); device->lpVtbl->Release(device); free(ao->ring); free(ao); return NULL; }
 
+    /* Try exclusive mode first with mix format */
     WAVEFORMATEX* mix = NULL;
     hr = ao->client->lpVtbl->GetMixFormat(ao->client, &mix);
-    if (FAILED(hr)) { LOG_ERROR("GetMixFormat: 0x%08lX", hr); ao->client->lpVtbl->Release(ao->client); free(ao->ring); free(ao); return NULL; }
+    if (FAILED(hr)) { LOG_ERROR("GetMixFormat: 0x%08lX", hr); device->lpVtbl->Release(device); ao->client->lpVtbl->Release(ao->client); free(ao->ring); free(ao); return NULL; }
 
-    ao->out_rate      = mix->nSamplesPerSec;
-    ao->out_channels  = mix->nChannels;
-    ao->out_bits      = mix->wBitsPerSample;
-    ao->out_frame_bytes = mix->nBlockAlign;
-    ao->bytes_per_sec = mix->nAvgBytesPerSec;
-
+    ao->exclusive = 0;
     hr = ao->client->lpVtbl->Initialize(ao->client,
-                                          AUDCLNT_SHAREMODE_SHARED,
+                                          AUDCLNT_SHAREMODE_EXCLUSIVE,
                                           AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                                           (REFERENCE_TIME)200000,
                                           (REFERENCE_TIME)0,
                                           mix,
                                           NULL);
-    CoTaskMemFree(mix);
-    if (FAILED(hr)) { LOG_ERROR("IAudioClient_Initialize: 0x%08lX", hr); ao->client->lpVtbl->Release(ao->client); free(ao->ring); free(ao); return NULL; }
+    if (FAILED(hr)) {
+        LOG_WARN("Exclusive with mix format failed: 0x%08lX, trying PCM16", hr);
+        /* Try 16-bit PCM at mix sample rate */
+        WAVEFORMATEX pcm16 = {0};
+        pcm16.wFormatTag = WAVE_FORMAT_PCM;
+        pcm16.nChannels = mix->nChannels;
+        pcm16.nSamplesPerSec = mix->nSamplesPerSec;
+        pcm16.wBitsPerSample = 16;
+        pcm16.nBlockAlign = pcm16.nChannels * pcm16.wBitsPerSample / 8;
+        pcm16.nAvgBytesPerSec = pcm16.nSamplesPerSec * pcm16.nBlockAlign;
+        pcm16.cbSize = 0;
+        hr = ao->client->lpVtbl->Initialize(ao->client,
+                                              AUDCLNT_SHAREMODE_EXCLUSIVE,
+                                              AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                                              (REFERENCE_TIME)200000,
+                                              (REFERENCE_TIME)0,
+                                              &pcm16,
+                                              NULL);
+    }
+
+    if (SUCCEEDED(hr)) {
+        ao->exclusive = 1;
+        /* Re-query the actual format used */
+        WAVEFORMATEX* actual = NULL;
+        ao->client->lpVtbl->GetMixFormat(ao->client, &actual);
+        if (actual) {
+            ao->out_rate      = actual->nSamplesPerSec;
+            ao->out_channels  = actual->nChannels;
+            ao->out_bits      = actual->wBitsPerSample;
+            ao->out_frame_bytes = actual->nBlockAlign;
+            ao->bytes_per_sec = actual->nAvgBytesPerSec;
+            CoTaskMemFree(actual);
+        } else {
+            ao->out_rate      = mix->nSamplesPerSec;
+            ao->out_channels  = mix->nChannels;
+            ao->out_bits      = 16;
+            ao->out_frame_bytes = mix->nChannels * 2;
+            ao->bytes_per_sec = mix->nSamplesPerSec * mix->nChannels * 2;
+        }
+        CoTaskMemFree(mix);
+        LOG_INFO("WASAPI: EXCLUSIVE mode %d Hz, %d ch, %d bit", ao->out_rate, ao->out_channels, ao->out_bits);
+    } else {
+        LOG_WARN("WASAPI exclusive failed: 0x%08lX, falling back to shared", hr);
+        /* Re-init client for shared mode */
+        ao->client->lpVtbl->Release(ao->client);
+        ao->client = NULL;
+        hr = device->lpVtbl->Activate(device, &_IID_IAudioClient_local, CLSCTX_ALL, NULL, (void**)&ao->client);
+        if (FAILED(hr)) { LOG_ERROR("Re-Activate: 0x%08lX", hr); CoTaskMemFree(mix); device->lpVtbl->Release(device); free(ao->ring); free(ao); return NULL; }
+
+        ao->out_rate      = mix->nSamplesPerSec;
+        ao->out_channels  = mix->nChannels;
+        ao->out_bits      = mix->wBitsPerSample;
+        ao->out_frame_bytes = mix->nBlockAlign;
+        ao->bytes_per_sec = mix->nAvgBytesPerSec;
+
+        hr = ao->client->lpVtbl->Initialize(ao->client,
+                                              AUDCLNT_SHAREMODE_SHARED,
+                                              AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                                              (REFERENCE_TIME)200000,
+                                              (REFERENCE_TIME)0,
+                                              mix,
+                                              NULL);
+        CoTaskMemFree(mix);
+        if (FAILED(hr)) { LOG_ERROR("IAudioClient_Initialize shared: 0x%08lX", hr); device->lpVtbl->Release(device); ao->client->lpVtbl->Release(ao->client); free(ao->ring); free(ao); return NULL; }
+        LOG_INFO("WASAPI: SHARED mode %d Hz, %d ch, %d bit", ao->out_rate, ao->out_channels, ao->out_bits);
+    }
+
+    device->lpVtbl->Release(device);
 
     ao->event = CreateEvent(NULL, FALSE, FALSE, NULL);
     hr = ao->client->lpVtbl->SetEventHandle(ao->client, ao->event);
@@ -314,12 +374,6 @@ void ao_write(AudioOut* ao, const uint8_t* data, int size) {
         ao->total_bytes_written += to_write;
         ao->last_write_size = to_write;
     }
-    {
-        static int wc = 0;
-        wc++;
-        if (wc <= 5 || wc % 2000 == 0)
-            LOG_INFO("ao_write[%d]: size=%d to_write=%d ring=%d", wc, size, to_write, ring_avail(ao));
-    }
 }
 
 void ao_set_pts(AudioOut* ao, double pts) {
@@ -328,7 +382,15 @@ void ao_set_pts(AudioOut* ao, double pts) {
 }
 
 double ao_get_clock(AudioOut* ao) {
-    if (!ao || !ao->clock) return 0;
+    if (!ao) return 0;
+    /* PTS-based clock: last written PTS minus buffered time */
+    if (ao->last_write_pts > 0 && ao->bytes_per_sec > 0) {
+        double buffered_sec = (double)ring_avail(ao) / ao->bytes_per_sec;
+        double clk = ao->last_write_pts - buffered_sec;
+        return clk > 0 ? clk : 0;
+    }
+    /* Fallback: WASAPI hardware clock */
+    if (!ao->clock) return 0;
     UINT64 pos = 0;
     if (FAILED(ao->clock->lpVtbl->GetPosition(ao->clock, &pos, NULL)))
         return 0;

@@ -97,6 +97,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int main(int argc, char* argv[])
 {
+    FreeConsole();
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
     MFStartup(MF_VERSION, 0);
 
@@ -139,6 +140,12 @@ int main(int argc, char* argv[])
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
+        /* Render D3D11 frame after message processing (not in WM_PAINT) */
+        if (g_player) {
+            RECT rc;
+            GetClientRect(g_hwnd, &rc);
+            player_render_d3d(g_player, rc.right, rc.bottom);
+        }
     }
 
     KillTimer(g_hwnd, TIMER_AUDIO_CHECK);

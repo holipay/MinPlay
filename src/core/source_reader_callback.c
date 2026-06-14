@@ -23,6 +23,7 @@ struct SourceReaderCallback {
     volatile int     running;
     volatile int     video_eof;
     volatile int     audio_eof;
+    volatile int     video_pending;
 };
 
 static HRESULT STDMETHODCALLTYPE cb_QueryInterface(IMFSourceReaderCallback* This,
@@ -108,7 +109,10 @@ static HRESULT STDMETHODCALLTYPE cb_OnReadSample(IMFSourceReaderCallback* This,
             if (ao_get_free(cb->ao) > 256 * 1024)
                 IMFSourceReader_ReadSample(cb->reader, dwStreamIndex, 0, NULL, NULL, NULL, NULL);
         } else {
-            IMFSourceReader_ReadSample(cb->reader, dwStreamIndex, 0, NULL, NULL, NULL, NULL);
+            InterlockedIncrement(&cb->video_pending);
+            if (cb->video_pending < 8) {
+                IMFSourceReader_ReadSample(cb->reader, dwStreamIndex, 0, NULL, NULL, NULL, NULL);
+            }
         }
     }
 
@@ -222,4 +226,12 @@ int src_cb_is_video_eof(SourceReaderCallback* cb) {
 
 int src_cb_is_audio_eof(SourceReaderCallback* cb) {
     return cb ? cb->audio_eof : 1;
+}
+
+void src_cb_consume_video(SourceReaderCallback* cb) {
+    if (cb) InterlockedDecrement(&cb->video_pending);
+}
+
+int src_cb_video_pending(SourceReaderCallback* cb) {
+    return cb ? cb->video_pending : 0;
 }

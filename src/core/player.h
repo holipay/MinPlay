@@ -31,6 +31,7 @@ int             player_has_video(Player* p);
 int             player_has_audio(Player* p);
 
 void            player_paint(Player* p, HDC hdc, int w, int h);
+void            player_render_d3d(Player* p, int w, int h);
 
 void            player_process_video_frame(Player* p, IMFSample* sample, LONGLONG timestamp);
 void            player_process_audio_frame(Player* p, IMFSample* sample, LONGLONG timestamp);
