@@ -40,12 +40,14 @@ public:
     void ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp);
 
     PlayerState GetState() const { return state_; }
+    HWND GetHwnd() const { return hwnd_; }
     double GetDuration() const;
     double GetPosition() const;
     bool HasVideo() const { return has_video_; }
     bool HasAudio() const { return has_audio_; }
     double GetVideoFps() const { return video_fps_; }
     bool IsFinished() const;
+    void OnVideoFormatChanged();
 
 private:
     struct VFrame {
@@ -66,7 +68,7 @@ private:
         }
     };
 
-    static constexpr int VQ_SIZE = 8;
+    static constexpr int VQ_SIZE = 32;
 
     HWND hwnd_ = nullptr;
     PlayerState state_ = PlayerState::Stopped;
@@ -80,6 +82,7 @@ private:
 
     bool has_video_ = false;
     bool has_audio_ = false;
+    bool is_network_ = false;
     int audio_bytes_per_sec_ = 0;
     double video_fps_ = 30.0;
 

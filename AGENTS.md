@@ -24,6 +24,7 @@ Single C++ (COM-style) project. No packages, no tests, no CI.
 | Media | `src/media/media_source.cpp` | MFSourceReader setup, stream enumeration |
 | Audio out | `src/audio_out/wasapi_audio_output.cpp` | WASAPI event-driven, ring buffer, resampling |
 | Video out | `src/video_out/d3d11_video_output.cpp` | D3D11 rendering with NV12 GPU shader |
+| Network | `src/network/hls_stream.cpp` | HLS m3u8 parser, WinHTTP downloader, IMFByteStream |
 | OSD | `src/util/osd.cpp` | Time/fps overlay |
 
 Data flow: MF callback → audio direct to ring / video `player_process_video_frame` (both in MF thread) → `WM_TIMER` (main thread) → `player_video_tick` sync + `vo_render` D3D11 → GPU YUV→RGB via pixel shader.
@@ -43,20 +44,33 @@ Data flow: MF callback → audio direct to ring / video `player_process_video_fr
 - **Video format negotiation**: Tries ARGB32 → RGB32(1) → RGB32(2) → NV12 → YUY2 → I420. NV12/RGB32 pass through to GPU directly; YUY2/I420 are converted to NV12 (data rearrangement, no color math) in `ProcessVideoFrame` (runs in MF callback thread).
 - **Chinese filenames**: Uses `CommandLineToArgvW` (not `MultiByteToWideChar(CP_UTF8)`) because `argv` uses system codepage on Windows.
 - **prebuf removed from WASAPI init**: MF source reader delivers small audio fragments (< prebuf threshold), causing WAV hang. Prebuf initialization was removed from `ao_wasapi.c`/`WasapiAudioOutput::Initialize`.
+- **HLS via IMFByteStream**: Windows has no built-in HLS scheme handler (MF_E_UNSUPPORTED_BYTESTREAM_TYPE). Fallback: custom HlsByteStream (IMFByteStream) + MFCreateSourceReaderFromByteStream. TS segments downloaded via WinHTTP in background thread.
+- **HLS pre-buffer**: First 3 TS segments are downloaded synchronously in `HlsManager::Open()` before source reader is created, to ensure MF has header data. Remaining segments downloaded by background thread.
+- **Media type change**: HLS adaptive bitrate switching triggers MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED / CURRENTMEDIATYPECHANGED in OnReadSample. Handler re-sets output format and calls Player::OnVideoFormatChanged(). Resolution changes are filtered (>16px delta) to ignore stride-only changes (1080→1088).
+- **Live stream**: HlsManager detects #EXT-X-ENDLIST absence → is_live_=true. Player::IsFinished() returns false for live, GetDuration() returns -1, Seek() is a no-op.
+- **Network buffering**: Audio threshold is bps*5 (5s) for network vs bps/5 (200ms) for local files. Video queue fill target is 15 frames for network vs 1 for local. VQ_SIZE=32.
 
 ## Current state
 
-WASAPI audio is working (MP4, WAV):
+HLS streaming works (live and VOD):
+- m3u8 parsed (master → media playlist), WinHTTP downloads TS segments
+- Custom HlsByteStream (IMFByteStream) feeds concatenated TS data to MF TS demuxer
+- Pre-buffers 3 segments before source reader creation; background thread continues download
+- Adaptive bitrate media type changes handled (resolution changes filtered for stride-only)
+
+WASAPI audio is working (MP4, WAV, HLS):
 - Callback writes audio directly to ring buffer (bypasses main thread)
 - Playback thread reads from ring → resamples → WASAPI output
 - Audio re-request throttled to prevent burst delivery that drains ring
 - Ring oscillates at healthy levels, no LOW warnings
+- Network streams use 5s buffer threshold vs 200ms for local files
 
 Video rendering is optimized:
 - Main thread video timer (`SetTimer` at video FPS) replaces high-priority `timeSetEvent`
 - CPU-side YUV→RGB conversion removed — NV12 data passed raw to D3D11 GPU shader
 - YUY2/I420 → NV12 conversion is lightweight data rearrangement (no color math)
 - `VideoTick` early-exits when no frames in queue
+- Network streams target 15 buffered frames vs 1 for local (VQ_SIZE=32)
 
 ## Crash history
 

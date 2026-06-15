@@ -6,6 +6,8 @@
 #include <mfreadwrite.h>
 #include <cstdint>
 
+class HlsManager;
+
 struct VideoInfo {
     int width = 0;
     int height = 0;
@@ -34,6 +36,7 @@ public:
     bool Seek(double seconds);
     double Duration() const { return duration_; }
     double Position() const { return last_position_; }
+    bool IsLive() const { return is_live_; }
 
     bool HasVideo() const { return has_video_; }
     bool HasAudio() const { return has_audio_; }
@@ -45,8 +48,12 @@ public:
     DWORD GetVideoStream() const { return video_stream_; }
     DWORD GetAudioStream() const { return audio_stream_; }
 
+    // Re-read video format after media type change
+    void ReconfigureVideo();
+
 private:
     ComPtr<IMFSourceReader> reader_;
+    HlsManager* hls_ = nullptr;  // non-null when HLS stream is active
     bool has_video_ = false;
     bool has_audio_ = false;
     DWORD video_stream_ = (DWORD)-1;
@@ -56,7 +63,9 @@ private:
     double duration_ = 0;
     double last_position_ = 0;
     PixelFormat pix_fmt_ = PixelFormat::Unknown;
+    bool is_live_ = false;
 
+    bool OpenHls(const wchar_t* url);
     static HRESULT GetUint64Pair(IMFAttributes* attr, REFGUID key,
                                  UINT32* a, UINT32* b);
 };

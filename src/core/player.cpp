@@ -44,6 +44,8 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
 
     has_video_ = source_->HasVideo();
     has_audio_ = source_->HasAudio();
+    is_network_ = (wcsncmp(url, L"http://", 7) == 0) ||
+                  (wcsncmp(url, L"https://", 8) == 0);
     pix_fmt_ = source_->GetPixelFormat();
 
     if (has_video_) {
@@ -149,6 +151,7 @@ void Player::PauseToggle() {
 
 void Player::Seek(double seconds) {
     if (!source_) return;
+    if (source_->IsLive()) return;
     if (seconds < 0) seconds = 0;
     bool was_playing = (state_ == PlayerState::Playing);
 
@@ -183,6 +186,7 @@ void Player::Seek(double seconds) {
 }
 
 double Player::GetDuration() const {
+    if (source_ && source_->IsLive()) return -1;
     return source_ ? source_->Duration() : 0;
 }
 
@@ -203,6 +207,7 @@ void Player::Paint(HDC /*hdc*/, int /*w*/, int /*h*/) {
 }
 
 bool Player::IsFinished() const {
+    if (source_ && source_->IsLive()) return false;
     bool vdone = !has_video_ || (callback_ && callback_->IsVideoEof());
     bool adone = !has_audio_ || (callback_ && callback_->IsAudioEof() && ao_ && ao_->GetBuffered() == 0);
     return vdone && adone;
@@ -313,7 +318,8 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 void Player::VideoTick() {
     if (!this || state_ != PlayerState::Playing) return;
 
-    // Keep pipeline fed
+    // Keep pipeline fed (network: keep at least 15 frames buffered)
+    int video_fill_target = is_network_ ? 15 : 1;
     if (has_video_ && callback_ && !callback_->IsVideoEof()) {
         int qsize;
         {
@@ -321,7 +327,7 @@ void Player::VideoTick() {
             qsize = vq_tail_ - vq_head_;
             if (qsize < 0) qsize += VQ_SIZE;
         }
-        if (qsize < 1)
+        if (qsize < video_fill_target)
             callback_->RequestVideoRead();
     }
 
@@ -402,13 +408,26 @@ void Player::VideoTick() {
             qsize = vq_tail_ - vq_head_;
             if (qsize < 0) qsize += VQ_SIZE;
         }
-        if (qsize < 1)
+        if (qsize < video_fill_target)
             callback_->RequestVideoRead();
     }
 
     // Render
     if (win_w_ > 0 && win_h_ > 0)
         RenderD3D(win_w_, win_h_);
+}
+
+void Player::OnVideoFormatChanged() {
+    if (!source_) return;
+    std::lock_guard<std::mutex> lock(vq_mutex_);
+    source_->ReconfigureVideo();
+    VideoInfo vi = source_->GetVideoInfo();
+    if (vi.width > 0) frame_w_ = vi.width;
+    if (vi.height > 0) frame_h_ = vi.height;
+    if (vi.fps > 0) video_fps_ = vi.fps;
+    pix_fmt_ = source_->GetPixelFormat();
+    LOG_INFO("Player video format updated: %dx%d @ %.1f fps",
+             frame_w_, frame_h_, video_fps_);
 }
 
 void Player::RenderD3D(int w, int h) {
@@ -427,7 +446,8 @@ void Player::CheckAudio() {
     if (has_audio_ && callback_ && !callback_->IsAudioEof()) {
         int buffered = ao_ ? ao_->GetBuffered() : 0;
         int bps = audio_bytes_per_sec_ > 0 ? audio_bytes_per_sec_ : (44100 * 2 * 2);
-        if (buffered < bps / 5) {
+        int threshold = is_network_ ? bps * 5 : bps / 5;
+        if (buffered < threshold) {
             callback_->RequestAudioRead();
         }
     }

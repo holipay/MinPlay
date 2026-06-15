@@ -1,4 +1,5 @@
 #include "media_source.h"
+#include "../network/hls_stream.h"
 #include "../util/log.h"
 #include <propvarutil.h>
 
@@ -30,12 +31,39 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
         sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
     }
 
+    // Check if URL is HTTP(S) — may need HLS path
+    bool is_http = (wcsncmp(url, L"http://", 7) == 0) ||
+                   (wcsncmp(url, L"https://", 8) == 0);
+
     ComPtr<IMFSourceReader> reader;
     hr = MFCreateSourceReaderFromURL(url, sattrs.get(), &reader);
     sattrs.reset();
     if (FAILED(hr)) {
-        LOG_ERROR("MFCreateSourceReaderFromURL failed: 0x%08lX", hr);
-        return false;
+        if (is_http) {
+            LOG_WARN("MFCreateSourceReaderFromURL failed: 0x%08lX — trying HLS path", hr);
+            reader.reset();
+            if (OpenHls(url)) {
+                // Re-create source reader attributes
+                hr = MFCreateAttributes(&sattrs, callback ? 2 : 1);
+                if (FAILED(hr)) return false;
+                if (callback) {
+                    sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
+                }
+                hr = MFCreateSourceReaderFromByteStream(
+                    hls_->GetByteStream(), sattrs.get(), &reader);
+                sattrs.reset();
+                if (FAILED(hr)) {
+                    LOG_ERROR("MFCreateSourceReaderFromByteStream failed: 0x%08lX", hr);
+                    return false;
+                }
+            } else {
+                LOG_ERROR("HLS path also failed");
+                return false;
+            }
+        } else {
+            LOG_ERROR("MFCreateSourceReaderFromURL failed: 0x%08lX", hr);
+            return false;
+        }
     }
 
     ComPtr<IMFMediaType> vmt;
@@ -124,8 +152,49 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     return true;
 }
 
+void MediaSource::ReconfigureVideo() {
+    if (!reader_ || video_stream_ == (DWORD)-1) return;
+    ComPtr<IMFMediaType> mt;
+    if (SUCCEEDED(reader_->GetCurrentMediaType(video_stream_, &mt))) {
+        UINT32 w = 0, h = 0, num = 0, den = 0;
+        GetUint64Pair(mt.get(), MF_MT_FRAME_SIZE, &w, &h);
+        GetUint64Pair(mt.get(), MF_MT_FRAME_RATE, &num, &den);
+        // Only update if resolution actually changed (ignore stride padding)
+        if (w > 0 && h > 0 &&
+            (abs((int)w - vi_.width) > 16 || abs((int)h - vi_.height) > 16)) {
+            vi_.width = (int)w;
+            vi_.height = (int)h;
+        }
+        if (den > 0) vi_.fps = (double)num / den;
+
+        GUID subtype;
+        if (SUCCEEDED(mt->GetGUID(MF_MT_SUBTYPE, &subtype))) {
+            if (subtype == MFVideoFormat_NV12) pix_fmt_ = PixelFormat::NV12;
+            else if (subtype == MFVideoFormat_I420) pix_fmt_ = PixelFormat::I420;
+            else if (subtype == MFVideoFormat_YUY2) pix_fmt_ = PixelFormat::YUY2;
+            else pix_fmt_ = PixelFormat::RGB32;
+        }
+        LOG_INFO("Video reconfigured: %dx%d @ %.1f fps (fmt=%d)",
+                 w, h, vi_.fps, (int)pix_fmt_);
+    }
+}
+
+bool MediaSource::OpenHls(const wchar_t* url) {
+    hls_ = new HlsManager();
+    if (!hls_->Open(url)) {
+        delete hls_; hls_ = nullptr;
+        return false;
+    }
+    is_live_ = hls_->IsLive();
+    duration_ = hls_->Duration();
+    LOG_INFO("HLS: %s, duration: %.1f s", is_live_ ? "LIVE" : "VOD", duration_);
+    return true;
+}
+
 void MediaSource::Close() {
     reader_.reset();
+    if (hls_) { hls_->Close(); delete hls_; hls_ = nullptr; }
+    is_live_ = false;
     has_video_ = false;
     has_audio_ = false;
     video_stream_ = (DWORD)-1;

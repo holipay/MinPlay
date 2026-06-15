@@ -39,9 +39,12 @@ STDMETHODIMP SourceReaderCallback::OnEvent(DWORD /*dwStreamIndex*/, IMFMediaEven
 
 HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESULT hrStatus, DWORD dwStreamIndex,
                                  DWORD dwStreamFlags, LONGLONG llTimestamp, IMFSample* pSample) {
-    if (FAILED(hrStatus) || !self->running_ || (dwStreamFlags & MF_SOURCE_READERF_ERROR)) {
-        if (dwStreamFlags & MF_SOURCE_READERF_ERROR)
-            LOG_ERROR("OnReadSample error stream=%lu", dwStreamIndex);
+    if ((FAILED(hrStatus) || (dwStreamFlags & MF_SOURCE_READERF_ERROR)) && self->running_) {
+        LOG_WARN("OnReadSample failed stream=%lu hr=0x%08lX flags=0x%08lX, retrying", dwStreamIndex, hrStatus, dwStreamFlags);
+        // Retry via main thread timer
+        if (self->player_ && self->player_->GetHwnd())
+            PostMessage(self->player_->GetHwnd(), WM_TIMER,
+                        dwStreamIndex == self->video_stream_ ? TIMER_VIDEO_DISPLAY : TIMER_AUDIO_CHECK, 0);
         return S_OK;
     }
 
@@ -52,6 +55,33 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
             self->audio_eof_ = true;
         LOG_INFO("EOF stream=%lu", dwStreamIndex);
         return S_OK;
+    }
+
+    // Handle media type changes (adaptive bitrate)
+    if (dwStreamFlags & MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED) {
+        LOG_INFO("Native media type changed stream=%lu", dwStreamIndex);
+        if (dwStreamIndex == self->video_stream_ && self->reader_) {
+            // Re-set our preferred output format
+            ComPtr<IMFMediaType> mt;
+            MFCreateMediaType(&mt);
+            mt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+            struct { const GUID* fmt; } fmts[] = {
+                { &MFVideoFormat_NV12 }, { &MFVideoFormat_I420 },
+                { &MFVideoFormat_YUY2 }, { &MFVideoFormat_ARGB32 },
+                { &MFVideoFormat_RGB32 },
+            };
+            for (auto& f : fmts) {
+                mt->SetGUID(MF_MT_SUBTYPE, *f.fmt);
+                if (SUCCEEDED(self->reader_->SetCurrentMediaType(
+                        dwStreamIndex, nullptr, mt.get())))
+                    break;
+            }
+        }
+    }
+
+    if (dwStreamFlags & (MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED |
+                         MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED)) {
+        if (self->player_) self->player_->OnVideoFormatChanged();
     }
 
     if (pSample) {
