@@ -113,6 +113,7 @@ HRESULT SourceReaderCallback::StartReading() {
     running_ = true;
     video_eof_ = false;
     audio_eof_ = false;
+    video_pending_ = 0;
     LeaveCriticalSection(&lock_);
 
     if (video_stream_ != (DWORD)-1) {

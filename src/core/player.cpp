@@ -384,23 +384,7 @@ void Player::VideoTick() {
                 frame_ready_ = true;
                 frame_size_ = frame_to_render.size;
 
-                int old_w = frame_w_, old_h = frame_h_;
-                if (source_ && source_->GetReader()) {
-                    ComPtr<IMFMediaType> mt;
-                    source_->GetReader()->GetCurrentMediaType(
-                        source_->GetVideoStream(), &mt);
-                    if (mt) {
-                        UINT64 size_val = 0;
-                        mt->GetUINT64(MF_MT_FRAME_SIZE, &size_val);
-                        frame_w_ = (int)(size_val >> 32);
-                        frame_h_ = (int)(size_val & 0xFFFFFFFF);
-                        mt.reset();
-                    }
-                }
-                if (frame_w_ == 0 || frame_h_ == 0) {
-                    frame_w_ = old_w;
-                    frame_h_ = old_h;
-                }
+
 
                 // Update pixel format from frame
                 if (frame_to_render.pix_fmt != PixelFormat::Unknown)

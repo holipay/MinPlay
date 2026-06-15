@@ -66,7 +66,7 @@ private:
         }
     };
 
-    static constexpr int VQ_SIZE = 32;
+    static constexpr int VQ_SIZE = 8;
 
     HWND hwnd_ = nullptr;
     PlayerState state_ = PlayerState::Stopped;

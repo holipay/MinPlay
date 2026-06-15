@@ -168,8 +168,6 @@ bool WasapiAudioOutput::Initialize(int sample_rate, int channels, int bits) {
     ring_ = (uint8_t*)malloc(RING_SIZE);
     if (!ring_) return false;
 
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-
     IMMDeviceEnumerator* dev_enum = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_MMDeviceEnumerator_LOCAL, nullptr,
         CLSCTX_ALL, IID_IMMDeviceEnumerator_LOCAL, (void**)&dev_enum);
@@ -320,7 +318,7 @@ void WasapiAudioOutput::Write(const uint8_t* data, int size) {
 
 double WasapiAudioOutput::GetClock() {
     if (last_write_pts_ > 0 && bytes_per_sec_ > 0) {
-        double buffered_sec = (double)RingAvail() / bytes_per_sec_;
+        double buffered_sec = (double)RingAvail() / (double)(in_rate_ * in_frame_bytes_);
         double clk = last_write_pts_ - buffered_sec;
         return clk > 0 ? clk : 0;
     }

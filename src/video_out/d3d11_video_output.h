@@ -42,12 +42,12 @@ private:
         "SamplerState sam : register(s0);"
         "float4 main(float4 pos:SV_POSITION, float2 uv:TEXCOORD) : SV_TARGET {"
         "  float Y = texY.Sample(sam, uv).r - 0.0625;"
-        "  float2 cr_cb = texUV.Sample(sam, uv).rg - 0.5;"
+        "  float2 uv_samp = texUV.Sample(sam, uv).rg - 0.5;"
         "  Y *= 1.164;"
         "  return float4("
-        "    Y + 1.596 * cr_cb.r,"
-        "    Y - 0.391 * cr_cb.g - 0.813 * cr_cb.r,"
-        "    Y + 2.018 * cr_cb.g,"
+        "    Y + 1.596 * uv_samp.g,"
+        "    Y - 0.391 * uv_samp.r - 0.813 * uv_samp.g,"
+        "    Y + 2.018 * uv_samp.r,"
         "    1);"
         "}";
 
@@ -89,6 +89,6 @@ private:
     static HRESULT CompileShader(const char* src, const char* target, ID3DBlob** blob);
     void ReleaseD3D11();
     void EnsureTextures(int w, int h, int is_nv12);
-    void UploadNV12(const uint8_t* data, int w, int h);
+    void UploadNV12(const uint8_t* data, int w, int h, int stride);
     void UploadRGB32(const uint8_t* data, int w, int h);
 };

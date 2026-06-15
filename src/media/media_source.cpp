@@ -26,7 +26,6 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     if (FAILED(hr)) return false;
 
     sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-    sattrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
     if (callback) {
         sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
     }
@@ -44,11 +43,11 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     vmt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
 
     struct { const GUID* fmt; PixelFormat pf; } fmts[] = {
+        { &MFVideoFormat_NV12,   PixelFormat::NV12  },
+        { &MFVideoFormat_I420,   PixelFormat::I420  },
+        { &MFVideoFormat_YUY2,   PixelFormat::YUY2  },
         { &MFVideoFormat_ARGB32, PixelFormat::RGB32 },
         { &MFVideoFormat_RGB32,  PixelFormat::RGB32 },
-        { &MFVideoFormat_NV12,   PixelFormat::NV12  },
-        { &MFVideoFormat_YUY2,   PixelFormat::YUY2  },
-        { &MFVideoFormat_I420,   PixelFormat::I420  },
     };
 
     for (auto& f : fmts) {

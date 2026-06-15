@@ -96,8 +96,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     int wargc = 0;
     LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
     if (wargv && wargc > 1) {
-        wcsncpy(url, wargv[1], 2039);
-        url[2039] = L'\0';
+        wcsncpy_s(url, 2048, wargv[1], _TRUNCATE);
     }
     if (wargv) LocalFree(wargv);
 
@@ -121,6 +120,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     g_player = new Player();
     if (!g_player->Open(g_hwnd, url)) {
         MessageBoxA(nullptr, "Failed to open media file", "Error", MB_OK);
+        delete g_player; g_player = nullptr;
         return 1;
     }
 

@@ -170,18 +170,18 @@ void D3D11VideoOutput::EnsureTextures(int w, int h, int is_nv12) {
     tex_is_nv12_ = is_nv12;
 }
 
-void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h) {
+void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride) {
     D3D11_MAPPED_SUBRESOURCE map;
 
     ctx_->Map(tex_y_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
     for (int row = 0; row < h; row++)
-        memcpy((uint8_t*)map.pData + row * map.RowPitch, data + row * w, w);
+        memcpy((uint8_t*)map.pData + row * map.RowPitch, data + row * stride, w);
     ctx_->Unmap(tex_y_, 0);
 
     ctx_->Map(tex_uv_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
-    const uint8_t* uv = data + w * h;
+    const uint8_t* uv = data + stride * h;
     for (int row = 0; row < h / 2; row++)
-        memcpy((uint8_t*)map.pData + row * map.RowPitch, uv + row * w, w);
+        memcpy((uint8_t*)map.pData + row * map.RowPitch, uv + row * stride, w);
     ctx_->Unmap(tex_uv_, 0);
 }
 
@@ -199,13 +199,18 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int dat
     if (!swap_ || !device_ || !data || src_w <= 0 || src_h <= 0) return;
     if (!rtv_) return;
 
-    int nv12_size = src_w * src_h * 3 / 2;
-    int is_nv12 = (abs(data_size - nv12_size) < 1000);
+    int is_nv12 = 0;
+    int src_stride = src_w;
+    if (src_h > 0) {
+        int approx_stride = (int)((LONGLONG)data_size * 2 / (3 * src_h));
+        is_nv12 = (approx_stride >= src_w && approx_stride < src_w + 2048);
+        if (is_nv12) src_stride = approx_stride;
+    }
 
     EnsureTextures(src_w, src_h, is_nv12);
 
     if (is_nv12)
-        UploadNV12(data, src_w, src_h);
+        UploadNV12(data, src_w, src_h, src_stride);
     else
         UploadRGB32(data, src_w, src_h);
 
