@@ -39,9 +39,12 @@ STDMETHODIMP SourceReaderCallback::OnEvent(DWORD /*dwStreamIndex*/, IMFMediaEven
 
 HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESULT hrStatus, DWORD dwStreamIndex,
                                  DWORD dwStreamFlags, LONGLONG llTimestamp, IMFSample* pSample) {
-    if ((FAILED(hrStatus) || (dwStreamFlags & MF_SOURCE_READERF_ERROR)) && self->running_) {
-        LOG_WARN("OnReadSample failed stream=%lu hr=0x%08lX flags=0x%08lX, retrying", dwStreamIndex, hrStatus, dwStreamFlags);
-        // Retry via main thread timer
+    // If stopped, discard everything (no processing, no re-request)
+    if (!self->running_) return S_OK;
+
+    if (FAILED(hrStatus) || (dwStreamFlags & MF_SOURCE_READERF_ERROR)) {
+        LOG_WARN("OnReadSample failed stream=%lu hr=0x%08lX flags=0x%08lX, retrying",
+                 dwStreamIndex, hrStatus, dwStreamFlags);
         if (self->player_ && self->player_->GetHwnd())
             PostMessage(self->player_->GetHwnd(), WM_TIMER,
                         dwStreamIndex == self->video_stream_ ? TIMER_VIDEO_DISPLAY : TIMER_AUDIO_CHECK, 0);

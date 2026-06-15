@@ -40,3 +40,6 @@ Makefile
 # Test media files (use command-line arg to specify path)
 *.mp4
 *.wav
+
+debug2.txt
+debug_log.txt

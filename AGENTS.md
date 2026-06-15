@@ -48,6 +48,10 @@ Data flow: MF callback → audio direct to ring / video `player_process_video_fr
 - **HLS pre-buffer**: First 3 TS segments are downloaded synchronously in `HlsManager::Open()` before source reader is created, to ensure MF has header data. Remaining segments downloaded by background thread.
 - **Media type change**: HLS adaptive bitrate switching triggers MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED / CURRENTMEDIATYPECHANGED in OnReadSample. Handler re-sets output format and calls Player::OnVideoFormatChanged(). Resolution changes are filtered (>16px delta) to ignore stride-only changes (1080→1088).
 - **Live stream**: HlsManager detects #EXT-X-ENDLIST absence → is_live_=true. Player::IsFinished() returns false for live, GetDuration() returns -1, Seek() is a no-op.
+- **HlsByteStream async E_PENDING**: For live streams, `BeginRead` returns `E_PENDING` when no data is available (instead of completing with 0 bytes, which MF interprets as EOF). When `AddSegment` adds new data, it checks for a pending read and fulfills it by calling `CompleteAsync` (releases lock, invokes callback). `Close`/`Clear` use `CancelPendingRead` (no callback invocation — safe during shutdown).
+- **HlsByteStream::Read must return S_OK not S_FALSE**: When `Read()` finds no data but no EOS marker, it must return `S_OK` with 0 bytes. Returning `S_FALSE` would make MF signal `MF_SOURCE_READERF_ENDOFSTREAM`, permanently stopping the pipeline. Only return `S_FALSE` when `has_eos_marker_` is set AND `read_pos_ >= total_bytes_`.
+- **Live pipeline restart via needs_wake_**: If the pipeline stalls (EOF signaled by MF before new segments arrived), `AddSegment` sets `needs_wake_` flag. The player's `CheckAudio()` and `VideoTick()` timers check `source_->HasNewHlsData()` for live streams; if true, they flush the source reader (to clear MF's internal EOF state), reset EOF flags via `ResetAudioEof()`/`ResetVideoEof()`, and re-request samples.
+- **HlsManager playlist reload**: `DownloadLoop()` calls `ReloadPlaylist()` for live streams after all known segments are consumed. `ReloadPlaylist` re-downloads the media m3u8, compares segment URLs against existing ones, and adds only genuinely new segments to the byte stream via `AddSegment`, which also fulfills any pending async read.
 - **Network buffering**: Audio threshold is bps*5 (5s) for network vs bps/5 (200ms) for local files. Video queue fill target is 15 frames for network vs 1 for local. VQ_SIZE=32.
 
 ## Current state
@@ -57,6 +61,9 @@ HLS streaming works (live and VOD):
 - Custom HlsByteStream (IMFByteStream) feeds concatenated TS data to MF TS demuxer
 - Pre-buffers 3 segments before source reader creation; background thread continues download
 - Adaptive bitrate media type changes handled (resolution changes filtered for stride-only)
+- Playlist reload for live streams: download loop calls `ReloadPlaylist()` when all known segments are consumed; new segments are parsed, downloaded, and added to the byte stream
+- Async E_PENDING on read: live streams hold reads pending when no data, fulfilled by AddSegment — keeps MF pipeline alive without signaling EOF
+- Live pipeline restart via needs_wake_: if pipeline stalls (EOF signaled), `AddSegment` sets flag; player timers reset EOF flags and re-request samples
 
 WASAPI audio is working (MP4, WAV, HLS):
 - Callback writes audio directly to ring buffer (bypasses main thread)

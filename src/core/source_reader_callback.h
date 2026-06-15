@@ -38,6 +38,8 @@ public:
 
     bool IsVideoEof() const { return video_eof_; }
     bool IsAudioEof() const { return audio_eof_; }
+    void ResetVideoEof() { video_eof_ = false; }
+    void ResetAudioEof() { audio_eof_ = false; }
     void ConsumeVideo() { InterlockedDecrement(&video_pending_); }
 
 private:

@@ -208,8 +208,9 @@ void Player::Paint(HDC /*hdc*/, int /*w*/, int /*h*/) {
 
 bool Player::IsFinished() const {
     if (source_ && source_->IsLive()) return false;
-    bool vdone = !has_video_ || (callback_ && callback_->IsVideoEof());
-    bool adone = !has_audio_ || (callback_ && callback_->IsAudioEof() && ao_ && ao_->GetBuffered() == 0);
+    bool vq_empty = (vq_head_ == vq_tail_);
+    bool vdone  = !has_video_ || (callback_ && callback_->IsVideoEof() && vq_empty && !frame_ready_);
+    bool adone  = !has_audio_ || (callback_ && callback_->IsAudioEof() && ao_ && ao_->GetBuffered() == 0);
     return vdone && adone;
 }
 
@@ -298,6 +299,7 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
             free(vq_[old_head].data);
             vq_[old_head].data = nullptr;
             vq_head_ = (old_head + 1) % VQ_SIZE;
+            if (callback_) callback_->ConsumeVideo();
         }
         VFrame* f = &vq_[vq_tail_];
         f->data = (uint8_t*)malloc(frame_size);
@@ -318,6 +320,24 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 void Player::VideoTick() {
     if (!this || state_ != PlayerState::Playing) return;
 
+    // Live HLS: if a stream stalled and new data arrived, restart the pipeline
+    if (source_ && source_->IsLive() &&
+        callback_ && (callback_->IsVideoEof() || callback_->IsAudioEof()) &&
+        source_->HlsByteStreamHasData() && source_->HasNewHlsData()) {
+        LOG_INFO("Live: new HLS data, flushing + restarting pipeline");
+        if (source_->GetReader()) {
+            IMFSourceReader* r = source_->GetReader();
+            r->Flush(source_->GetVideoStream());
+            r->Flush(source_->GetAudioStream());
+            callback_->ResetVideoEof();
+            callback_->ResetAudioEof();
+            // Reset clock so new frame timestamps (~0) match the wall clock
+            start_time_ = GetTimeSec(perf_freq_);
+            pause_offset_ = 0;
+            if (sync_) sync_->Seek();
+        }
+    }
+
     // Keep pipeline fed (network: keep at least 15 frames buffered)
     int video_fill_target = is_network_ ? 15 : 1;
     if (has_video_ && callback_ && !callback_->IsVideoEof()) {
@@ -335,9 +355,11 @@ void Player::VideoTick() {
     if (vq_head_ == vq_tail_ && !frame_ready_)
         return;
 
-    // Get audio clock
+    // Get audio clock — after audio EOF the ring-buffer clock estimate freezes
+    // (last_write_pts_ stays at the final sample while RingAvail drains to 0),
+    // so fall back to wall-clock elapsed time instead.
     double audio_clk = 0;
-    if (has_audio_ && ao_)
+    if (has_audio_ && ao_ && callback_ && !callback_->IsAudioEof())
         audio_clk = ao_->GetClock();
     if (audio_clk <= 0.001)
         audio_clk = ElapsedSec();
@@ -450,15 +472,5 @@ void Player::CheckAudio() {
         if (buffered < threshold) {
             callback_->RequestAudioRead();
         }
-    }
-
-    if (has_video_ && callback_ && !callback_->IsVideoEof()) {
-        bool has_frames;
-        {
-            std::lock_guard<std::mutex> lock(vq_mutex_);
-            has_frames = (vq_head_ != vq_tail_);
-        }
-        if (!has_frames)
-            callback_->RequestVideoRead();
     }
 }

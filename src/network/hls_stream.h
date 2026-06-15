@@ -34,6 +34,7 @@ private:
     std::wstring ResolveUrl(const std::wstring& base, const std::wstring& relative);
 
     void DownloadLoop();
+    void ReloadPlaylist();
 
     std::vector<HlsSegment> segments_;
     bool is_live_ = false;
@@ -89,6 +90,8 @@ public:
     void SetEndOfStream();
     void Clear();
     bool HasCapability(DWORD cap) const;
+    bool CheckAndClearNeedsWake();
+    bool HasUnreadData() const;
 
 private:
     volatile LONG ref_count_ = 1;
@@ -106,8 +109,9 @@ private:
     bool has_eos_marker_ = false;
 
     int64_t read_pos_ = 0;
+    volatile LONG needs_wake_ = 0;
 
-    // Async read support
+    // Async read support (live streams: hold pending when no data)
     BYTE* async_buf_ = nullptr;
     ULONG async_size_ = 0;
     IMFAsyncCallback* async_cb_ = nullptr;
@@ -116,4 +120,7 @@ private:
     HRESULT async_hr_ = S_OK;
     bool async_pending_ = false;
     void CompleteAsync(HRESULT hr, ULONG bytesRead);
+    // Assumes lock_ held; copies data from segs starting at read_pos_, advances read_pos_
+    ULONG CopyFromSegmentsLocked(BYTE* pb, ULONG cb);
+    void CancelPendingRead();
 };

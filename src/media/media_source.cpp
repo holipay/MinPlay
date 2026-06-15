@@ -204,6 +204,15 @@ void MediaSource::Close() {
     pix_fmt_ = PixelFormat::Unknown;
 }
 
+bool MediaSource::HasNewHlsData() {
+    if (!hls_) return false;
+    return hls_->GetByteStream() && hls_->GetByteStream()->CheckAndClearNeedsWake();
+}
+
+bool MediaSource::HlsByteStreamHasData() {
+    return hls_ && hls_->GetByteStream() && hls_->GetByteStream()->HasUnreadData();
+}
+
 bool MediaSource::Seek(double seconds) {
     if (!reader_) return false;
     PROPVARIANT var;
