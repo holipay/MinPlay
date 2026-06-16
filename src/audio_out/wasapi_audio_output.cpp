@@ -317,16 +317,19 @@ void WasapiAudioOutput::Write(const uint8_t* data, int size) {
 }
 
 double WasapiAudioOutput::GetClock() {
-    if (last_write_pts_ > 0 && bytes_per_sec_ > 0) {
+    // Hardware clock: sample position from audio device — accurate regardless of buffer depth
+    if (clock_) {
+        UINT64 pos = 0;
+        if (SUCCEEDED(clock_->GetPosition(&pos, nullptr)))
+            return (double)pos / out_rate_;
+    }
+    // Fallback: PTS estimate minus buffered duration (large buffers skew this)
+    if (last_write_pts_ > 0 && in_rate_ > 0 && in_frame_bytes_ > 0) {
         double buffered_sec = (double)RingAvail() / (double)(in_rate_ * in_frame_bytes_);
         double clk = last_write_pts_ - buffered_sec;
         return clk > 0 ? clk : 0;
     }
-    if (!clock_) return 0;
-    UINT64 pos = 0;
-    if (FAILED(clock_->GetPosition(&pos, nullptr)))
-        return 0;
-    return (double)pos / out_rate_;
+    return 0;
 }
 
 int WasapiAudioOutput::GetBuffered() { return RingAvail(); }
