@@ -141,11 +141,19 @@ void Player::PauseToggle() {
         pause_start_ = GetTimeSec(perf_freq_);
         if (callback_) callback_->Stop();
         if (ao_) ao_->Pause();
+        KillTimer(hwnd_, TIMER_VIDEO_DISPLAY);
     } else if (state_ == PlayerState::Paused) {
         state_ = PlayerState::Playing;
         pause_offset_ += GetTimeSec(perf_freq_) - pause_start_;
         if (ao_) ao_->Resume();
         if (callback_) callback_->StartReading();
+        if (has_video_) {
+            double fps = video_fps_ > 0 ? video_fps_ : 30.0;
+            int period = (int)(1000.0 / fps);
+            if (period < 1) period = 1;
+            SetTimer(hwnd_, TIMER_VIDEO_DISPLAY, period, nullptr);
+            PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
+        }
     }
 }
 
@@ -364,9 +372,8 @@ void Player::VideoTick() {
     if (audio_clk <= 0.001)
         audio_clk = ElapsedSec();
 
-    // Find best frame to render using sync
-    VFrame frame_to_render{};
-    bool have_frame = false;
+    // Find best frame to render using sync; copy directly to frame_buf_
+    bool rendered = false;
 
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
@@ -390,52 +397,26 @@ void Player::VideoTick() {
                 break;
             }
             // SYNC_RENDER
-            frame_to_render.data = (uint8_t*)malloc(f->size);
-            memcpy(frame_to_render.data, f->data, f->size);
-            frame_to_render.size = f->size;
-            frame_to_render.timestamp = f->timestamp;
-            frame_to_render.pix_fmt = f->pix_fmt;
-            have_frame = true;
-
+            {
+                std::lock_guard<std::mutex> lock_f(frame_mutex_);
+                if (frame_buf_ && f->size <= frame_buf_size_) {
+                    memcpy(frame_buf_, f->data, f->size);
+                    frame_ready_ = true;
+                    frame_size_ = f->size;
+                    if (f->pix_fmt != PixelFormat::Unknown)
+                        pix_fmt_ = f->pix_fmt;
+                }
+            }
             free(f->data); f->data = nullptr;
             vq_head_ = next;
             callback_->ConsumeVideo();
+            rendered = true;
             break;
         }
     }
 
-    if (have_frame) {
-        {
-            std::lock_guard<std::mutex> lock(frame_mutex_);
-            if (frame_buf_ && frame_to_render.size <= frame_buf_size_) {
-                memcpy(frame_buf_, frame_to_render.data, frame_to_render.size);
-                frame_ready_ = true;
-                frame_size_ = frame_to_render.size;
-
-
-
-                // Update pixel format from frame
-                if (frame_to_render.pix_fmt != PixelFormat::Unknown)
-                    pix_fmt_ = frame_to_render.pix_fmt;
-            }
-        }
-        // ~VFrame dtor will free(frame_to_render.data)
-    }
-
-    // Refill pipeline
-    if (has_video_ && callback_ && !callback_->IsVideoEof()) {
-        int qsize;
-        {
-            std::lock_guard<std::mutex> lock(vq_mutex_);
-            qsize = vq_tail_ - vq_head_;
-            if (qsize < 0) qsize += VQ_SIZE;
-        }
-        if (qsize < video_fill_target)
-            callback_->RequestVideoRead();
-    }
-
     // Render
-    if (win_w_ > 0 && win_h_ > 0)
+    if (rendered && win_w_ > 0 && win_h_ > 0)
         RenderD3D(win_w_, win_h_);
 }
 

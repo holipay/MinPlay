@@ -174,14 +174,22 @@ void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride)
     D3D11_MAPPED_SUBRESOURCE map;
 
     ctx_->Map(tex_y_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
-    for (int row = 0; row < h; row++)
-        memcpy((uint8_t*)map.pData + row * map.RowPitch, data + row * stride, w);
+    if (map.RowPitch == (UINT)stride) {
+        memcpy(map.pData, data, (SIZE_T)stride * h);
+    } else {
+        for (int row = 0; row < h; row++)
+            memcpy((uint8_t*)map.pData + row * map.RowPitch, data + row * stride, w);
+    }
     ctx_->Unmap(tex_y_, 0);
 
     ctx_->Map(tex_uv_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
     const uint8_t* uv = data + stride * h;
-    for (int row = 0; row < h / 2; row++)
-        memcpy((uint8_t*)map.pData + row * map.RowPitch, uv + row * stride, w);
+    if (map.RowPitch == (UINT)stride) {
+        memcpy(map.pData, uv, (SIZE_T)stride * (h / 2));
+    } else {
+        for (int row = 0; row < h / 2; row++)
+            memcpy((uint8_t*)map.pData + row * map.RowPitch, uv + row * stride, w);
+    }
     ctx_->Unmap(tex_uv_, 0);
 }
 
@@ -190,14 +198,20 @@ void D3D11VideoOutput::UploadRGB32(const uint8_t* data, int w, int h) {
     D3D11_MAPPED_SUBRESOURCE map;
     HRESULT hr = ctx_->Map(tex_rgb_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
     if (FAILED(hr)) { LOG_WARN("Map tex_rgb failed: 0x%08lX", hr); return; }
-    for (int row = 0; row < h; row++)
-        memcpy((uint8_t*)map.pData + row * map.RowPitch, data + row * w * 4, w * 4);
+    int stride = w * 4;
+    if (map.RowPitch == (UINT)stride) {
+        memcpy(map.pData, data, (SIZE_T)stride * h);
+    } else {
+        for (int row = 0; row < h; row++)
+            memcpy((uint8_t*)map.pData + row * map.RowPitch, data + row * stride, stride);
+    }
     ctx_->Unmap(tex_rgb_, 0);
 }
 
 void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int data_size) {
     if (!swap_ || !device_ || !data || src_w <= 0 || src_h <= 0) return;
     if (!rtv_) return;
+    if (IsIconic(hwnd_)) return;
 
     int is_nv12 = 0;
     int src_stride = src_w;
