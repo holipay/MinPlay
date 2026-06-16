@@ -104,10 +104,11 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
             if (SUCCEEDED(pSample->ConvertToContiguousBuffer(&buf))) {
                 BYTE* data = nullptr;
                 DWORD max_len = 0, cur_len = 0;
-                buf->Lock(&data, &max_len, &cur_len);
-                self->ao_->Write(data, (int)(std::min)(cur_len, (DWORD)INT_MAX));
-                self->ao_->SetPts(llTimestamp / 10000000.0);
-                buf->Unlock();
+                if (SUCCEEDED(buf->Lock(&data, &max_len, &cur_len))) {
+                    self->ao_->Write(data, (int)(std::min)(cur_len, (DWORD)INT_MAX));
+                    self->ao_->SetPts(llTimestamp / 10000000.0);
+                    buf->Unlock();
+                }
             }
         } else if (dwStreamIndex == self->video_stream_ && self->player_) {
             self->player_->ProcessVideoFrame(pSample, llTimestamp);

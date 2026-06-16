@@ -169,6 +169,12 @@ ULONG HlsByteStream::CopyFromSegmentsLocked(BYTE* pb, ULONG cb) {
             cb -= (ULONG)to_copy;
             pb += to_copy;
             read_pos_ += to_copy;
+            // Free fully consumed segment data to prevent unbounded growth in live streams.
+            // The segment struct remains in segs_ for offset tracking (binary search).
+            if (offset_in_seg + (int64_t)to_copy >= (int64_t)seg.size) {
+                free(seg.data);
+                seg.data = nullptr;
+            }
         } else {
             break;
         }
@@ -797,7 +803,10 @@ void HlsManager::DownloadLoop() {
             LeaveCriticalSection(&seg_lock_);
             if (!has_more) {
                 if (!is_live_) {
-                    byte_stream_->SetEndOfStream();
+                    if (!eos_sent_) {
+                        byte_stream_->SetEndOfStream();
+                        eos_sent_ = true;
+                    }
                     WaitForSingleObject(wake_event_, 1000);
                     continue;
                 }

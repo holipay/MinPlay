@@ -57,6 +57,7 @@ private:
     HANDLE wake_event_ = nullptr;
 
     int consumed_up_to_ = 0;
+    bool eos_sent_ = false;
     CRITICAL_SECTION seg_lock_;
 };
 

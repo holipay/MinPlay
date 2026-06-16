@@ -144,7 +144,11 @@ DWORD WasapiAudioOutput::PlaybackThreadProc() {
 
         UINT32 padding = 0;
         HRESULT hr = client_->GetCurrentPadding(&padding);
-        if (FAILED(hr)) { playing_ = false; break; }
+        if (FAILED(hr)) {
+            LOG_ERROR("WASAPI GetCurrentPadding failed: 0x%08lX — audio device lost", hr);
+            playing_ = false;
+            break;
+        }
         UINT32 frames = buffer_frames_ - padding;
         if (frames == 0) continue;
 

@@ -94,16 +94,16 @@ bool D3D11VideoOutput::Initialize(HWND hwnd, int w, int h) {
     if (SUCCEEDED(hr)) {
         device_->CreatePixelShader(
             psblob->GetBufferPointer(), psblob->GetBufferSize(), nullptr, &ps_nv12_);
-        psblob->Release();
     }
+    if (psblob) psblob->Release();
 
     psblob = nullptr;
     hr = CompileShader(PS_RGB_SRC, "ps_5_0", &psblob);
     if (SUCCEEDED(hr)) {
         device_->CreatePixelShader(
             psblob->GetBufferPointer(), psblob->GetBufferSize(), nullptr, &ps_rgb_);
-        psblob->Release();
     }
+    if (psblob) psblob->Release();
 
     D3D11_BUFFER_DESC bd = {sizeof(s_quad), D3D11_USAGE_DYNAMIC,
                             D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
