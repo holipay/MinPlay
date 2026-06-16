@@ -414,10 +414,6 @@ void Player::VideoTick() {
             callback_->RequestVideoRead();
     }
 
-    // Early-out if no frames
-    if (vq_head_.load(std::memory_order_relaxed) == vq_tail_.load(std::memory_order_relaxed) && !frame_ready_)
-        return;
-
     // Get audio clock — after audio EOF the ring-buffer clock estimate freezes
     // (last_write_pts_ stays at the final sample while RingAvail drains to 0),
     // so fall back to wall-clock elapsed time instead.

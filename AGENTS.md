@@ -2,7 +2,7 @@
 
 ## Build
 
-**Always use `build.bat`**. Do NOT use CMakeLists.txt — it is stale (missing `source_reader_callback.c`, uses `WIN32` subsystem with `main()` entry).
+**Always use `build.bat`** (or `cmake -B build && cmake --build build` — CMakeLists.txt is now correct).
 
 ```
 cmd /c build.bat
@@ -14,7 +14,7 @@ Run: `.\MinPlay.exe D:\photo\build\test\call_me.mp4`
 
 ## Architecture
 
-Single C++ (COM-style) project. No packages, no tests, no CI.
+Single C++ (COM-style) project. No packages. Tests in `tests/` (29 tests, `build_tests.bat`). CI in `.github/workflows/build.yml`.
 
 | Module | File | Role |
 |--------|------|------|
@@ -31,12 +31,12 @@ Data flow: MF callback → audio direct to ring / video `player_process_video_fr
 
 ## Critical gotchas
 
-- **Build**: Only `build.bat` works. CMakeLists.txt is wrong (uses C entry, wrong subsystem, stale file list).
+- **Build**: Only `build.bat` works. CMakeLists.txt is now correct (use `cmake -B build && cmake --build build`).
 - **COM in C++**: Use `ComPtr<T>` (from `mfapi.h` via `#include <mfobjects.h>`). Always call `.reset()` to release. Never call `.ReleaseAndGetAddressOf()` — that bypasses refcounting.
 - **IMFSample in OnReadSample — DO NOT Release**: MF owns the sample passed to `OnReadSample`. The C++ port added `pSample->Release()` at the end, which decremented MF's reference and caused `mfcore.dll` crash when MF tried to reuse the sample. C code never released pSample (C++ `ComPtr` would auto-release on function exit, so `.Release()` or letting the smart pointer release is also wrong unless you AddRef first).
 - **WASAPI GUIDs**: Not in any import lib on SDK 10.0.28000.0. Must be defined as `static const` structs. See `wasapi_audio_output.cpp` header for values.
-- **SourceReader callback re-request**: Audio re-request is throttled — only calls `ReadSample` when `ao_get_free > 256KB`. Video re-request uses `video_pending_` counter (< 2). `CheckAudio` timer (50ms) re-requests when ring is low.
-- **Ring buffer SPSC**: `volatile ring_head`/`ring_tail`, single producer (callback) + single consumer (playback thread). Safe on x86 without locks.
+- **SourceReader callback re-request**: Audio re-request is throttled — only calls `ReadSample` when `ao_get_free > 256KB`. Video re-request uses `std::atomic<LONG> video_pending_` (< 2). `CheckAudio` timer (50ms) re-requests when ring is low.
+- **Ring buffer SPSC**: `std::atomic<int> ring_head`/`ring_tail`, single producer (callback) + single consumer (playback thread). Safe on x86 without locks. `RingWrite` uses `memory_order_release` on head, `RingAvail` uses `memory_order_acquire` on both, `FillBuffer` uses `memory_order_release` on tail.
 - **A/V sync**: No audio speed adjustment — video thread handles sync by dropping/delaying frames. Speed is always 1.0.
 - **No Sleep in message loop**: Blocks message dispatch, freezes window.
 - **Resample ratio**: `ratio = in_rate / out_rate * speed`. NOT `/ speed` — that inverts the direction and creates positive feedback.
