@@ -5,6 +5,22 @@
 #include <sstream>
 #include <algorithm>
 #include <cstdlib>
+#include <memory>
+
+struct WinHttpHandle {
+    HINTERNET h = nullptr;
+    ~WinHttpHandle() { if (h) WinHttpCloseHandle(h); }
+    WinHttpHandle() = default;
+    explicit WinHttpHandle(HINTERNET h_) : h(h_) {}
+    WinHttpHandle(const WinHttpHandle&) = delete;
+    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
+    WinHttpHandle(WinHttpHandle&& o) noexcept : h(o.h) { o.h = nullptr; }
+    WinHttpHandle& operator=(WinHttpHandle&& o) noexcept { if (h) WinHttpCloseHandle(h); h = o.h; o.h = nullptr; return *this; }
+    void reset(HINTERNET h_ = nullptr) { if (h) WinHttpCloseHandle(h); h = h_; }
+    HINTERNET* operator&() { return &h; }
+    operator HINTERNET() const { return h; }
+    explicit operator bool() const { return h != nullptr; }
+};
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -371,33 +387,30 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
         host = host.substr(0, colon);
     }
 
-    HINTERNET hSession = WinHttpOpen(L"MinPlay/1.0",
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, nullptr, nullptr, 0);
+    WinHttpHandle hSession(WinHttpOpen(L"MinPlay/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, nullptr, nullptr, 0));
     if (!hSession) { LOG_ERROR("WinHttpOpen failed: %u", GetLastError()); return false; }
 
-    HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), port, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+    WinHttpHandle hConnect(WinHttpConnect(hSession, host.c_str(), port, 0));
+    if (!hConnect) return false;
 
     DWORD flags = WINHTTP_FLAG_ESCAPE_DISABLE;
     if (is_https) flags |= WINHTTP_FLAG_SECURE;
 
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path.c_str(), nullptr,
-        nullptr, nullptr, flags);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+    WinHttpHandle hRequest(WinHttpOpenRequest(hConnect, L"GET", path.c_str(), nullptr,
+        nullptr, nullptr, flags));
+    if (!hRequest) return false;
 
     // Set timeout
     WinHttpSetTimeouts(hRequest, 5000, 5000, 10000, 10000);
 
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
         WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
         return false;
     }
 
-    if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+    if (!WinHttpReceiveResponse(hRequest, nullptr))
         return false;
-    }
 
     DWORD status_code = 0;
     DWORD status_size = sizeof(status_code);
@@ -406,7 +419,6 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
 
     if (status_code != 200) {
         LOG_WARN("HTTP %lu for %ws", status_code, url);
-        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
         return false;
     }
 
@@ -416,9 +428,6 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
     while (WinHttpReadData(hRequest, buf, sizeof(buf), &bytes_read) && bytes_read > 0)
         out.insert(out.end(), buf, buf + bytes_read);
 
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
     return true;
 }
 

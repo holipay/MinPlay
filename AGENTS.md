@@ -32,7 +32,7 @@ Data flow: MF callback → audio direct to ring / video `player_process_video_fr
 ## Critical gotchas
 
 - **Build**: Only `build.bat` works. CMakeLists.txt is now correct (use `cmake -B build && cmake --build build`).
-- **COM in C++**: Use `ComPtr<T>` (from `mfapi.h` via `#include <mfobjects.h>`). Always call `.reset()` to release. Never call `.ReleaseAndGetAddressOf()` — that bypasses refcounting.
+- **COM in C++**: Use `ComPtr<T>` (custom impl in `src/util/com_ptr.h`). Call `.reset()` or let destructor release. `operator&()` releases current pointer then returns address (safe only for empty ComPtrs passed to creation functions). `.ReleaseAndGetAddress()` does the same. Build with `/EHsc` (C++ exceptions on, SEH off).
 - **IMFSample in OnReadSample — DO NOT Release**: MF owns the sample passed to `OnReadSample`. The C++ port added `pSample->Release()` at the end, which decremented MF's reference and caused `mfcore.dll` crash when MF tried to reuse the sample. C code never released pSample (C++ `ComPtr` would auto-release on function exit, so `.Release()` or letting the smart pointer release is also wrong unless you AddRef first).
 - **WASAPI GUIDs**: Not in any import lib on SDK 10.0.28000.0. Must be defined as `static const` structs. See `wasapi_audio_output.cpp` header for values.
 - **SourceReader callback re-request**: Audio re-request is throttled — only calls `ReadSample` when `ao_get_free > 256KB`. Video re-request uses `std::atomic<LONG> video_pending_` (< 2). `CheckAudio` timer (50ms) re-requests when ring is low.
