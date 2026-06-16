@@ -2,7 +2,7 @@
 #include <cstdio>
 #include <cstring>
 
-void OSD::Draw(HDC hdc, int, int,
+void OSD::Draw(HDC hdc,
                double position, double duration, int fps) {
     if (!hdc) return;
 

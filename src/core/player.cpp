@@ -238,9 +238,9 @@ void Player::Resize(int w, int h) {
     win_h_ = h;
 }
 
-void Player::Paint(HDC hdc, int w, int h) {
+void Player::Paint(HDC hdc, int /*w*/, int /*h*/) {
     if (osd_) {
-        osd_->Draw(hdc, w, h, GetPosition(), GetDuration(),
+        osd_->Draw(hdc, GetPosition(), GetDuration(),
                    (int)video_fps_.load(std::memory_order_relaxed));
     }
     PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
@@ -427,8 +427,8 @@ void Player::VideoTick() {
             callback_->ResetVideoEof();
             callback_->ResetAudioEof();
             // Reset clock so new frame timestamps (~0) match the wall clock
-            start_time_ = GetTimeSec(perf_freq_);
-            pause_offset_ = 0;
+            start_time_.store(GetTimeSec(perf_freq_), std::memory_order_relaxed);
+            pause_offset_.store(0, std::memory_order_relaxed);
             if (sync_) sync_->Seek();
         }
     }
@@ -567,8 +567,8 @@ void Player::CheckAudio() {
             r->Flush(source_->GetAudioStream());
             callback_->ResetVideoEof();
             callback_->ResetAudioEof();
-            start_time_ = GetTimeSec(perf_freq_);
-            pause_offset_ = 0;
+            start_time_.store(GetTimeSec(perf_freq_), std::memory_order_relaxed);
+            pause_offset_.store(0, std::memory_order_relaxed);
             if (sync_) sync_->Seek();
             callback_->RequestVideoRead();
             callback_->RequestAudioRead();
