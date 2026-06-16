@@ -2,13 +2,14 @@
 #include <cstdio>
 #include <cstring>
 
-void OSD::Draw(HDC hdc, int /*win_w*/, int /*win_h*/,
+void OSD::Draw(HDC hdc, int, int,
                double position, double duration, int fps) {
     if (!hdc) return;
 
     char buf[128];
     int pos_min = (int)position / 60;
     int pos_sec = (int)position % 60;
+    if (duration < 0) duration = 0;
     int dur_min = (int)duration / 60;
     int dur_sec = (int)duration % 60;
 

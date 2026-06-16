@@ -108,13 +108,20 @@ bool D3D11VideoOutput::Initialize(HWND hwnd, int w, int h) {
     D3D11_BUFFER_DESC bd = {sizeof(s_quad), D3D11_USAGE_DYNAMIC,
                             D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
     D3D11_SUBRESOURCE_DATA sd = {s_quad, 0, 0};
-    device_->CreateBuffer(&bd, &sd, &vbuf_);
+    if (FAILED(device_->CreateBuffer(&bd, &sd, &vbuf_)) || !vbuf_) {
+        LOG_ERROR("CreateBuffer vertex failed");
+        return false;
+    }
 
     D3D11_SAMPLER_DESC sd_sam = {D3D11_FILTER_MIN_MAG_MIP_LINEAR,
         D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE_ADDRESS_CLAMP,
         D3D11_TEXTURE_ADDRESS_CLAMP,
         0, 0, D3D11_COMPARISON_NEVER, 0, D3D11_FLOAT32_MAX};
-    device_->CreateSamplerState(&sd_sam, &sam_);
+    if (FAILED(device_->CreateSamplerState(&sd_sam, &sam_)) || !sam_) {
+        LOG_ERROR("CreateSamplerState failed");
+        vbuf_->Release(); vbuf_ = nullptr;
+        return false;
+    }
 
     LOG_INFO("D3D11 feature level %d.%d",
              (got >> 12) & 0xF, (got >> 8) & 0xF);
@@ -172,8 +179,10 @@ void D3D11VideoOutput::EnsureTextures(int w, int h, int is_nv12) {
 
 void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride) {
     D3D11_MAPPED_SUBRESOURCE map;
+    HRESULT hr;
 
-    ctx_->Map(tex_y_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+    hr = ctx_->Map(tex_y_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+    if (FAILED(hr)) { LOG_WARN("Map tex_y_ failed: 0x%08lX", hr); return; }
     if (map.RowPitch == (UINT)stride) {
         memcpy(map.pData, data, (SIZE_T)stride * h);
     } else {
@@ -182,7 +191,8 @@ void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride)
     }
     ctx_->Unmap(tex_y_, 0);
 
-    ctx_->Map(tex_uv_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+    hr = ctx_->Map(tex_uv_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+    if (FAILED(hr)) { LOG_WARN("Map tex_uv_ failed: 0x%08lX", hr); return; }
     const uint8_t* uv = data + stride * h;
     if (map.RowPitch == (UINT)stride) {
         memcpy(map.pData, uv, (SIZE_T)stride * (h / 2));
@@ -217,7 +227,7 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int dat
     int src_stride = src_w;
     if (src_h > 0) {
         int approx_stride = (int)((LONGLONG)data_size * 2 / (3 * src_h));
-        is_nv12 = (approx_stride >= src_w && approx_stride < src_w + 2048);
+        is_nv12 = (approx_stride >= src_w && approx_stride < src_w + 256);
         if (is_nv12) src_stride = approx_stride;
     }
 
@@ -255,7 +265,10 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int dat
         {{ hw, -hh}, {1, 1}},
     };
     D3D11_MAPPED_SUBRESOURCE vb_map;
-    ctx_->Map(vbuf_, 0, D3D11_MAP_WRITE_DISCARD, 0, &vb_map);
+    if (FAILED(ctx_->Map(vbuf_, 0, D3D11_MAP_WRITE_DISCARD, 0, &vb_map))) {
+        LOG_WARN("Map vertex buffer failed");
+        return;
+    }
     memcpy(vb_map.pData, box, sizeof(box));
     ctx_->Unmap(vbuf_, 0);
 
@@ -288,17 +301,20 @@ void D3D11VideoOutput::Resize(int w, int h) {
     win_w_ = w;
     win_h_ = h;
 
-    if (rtv_) { rtv_->Release(); rtv_ = nullptr; }
     HRESULT hr = swap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
     if (FAILED(hr)) {
         LOG_WARN("ResizeBuffers failed: 0x%08lX", hr);
         return;
     }
 
+    if (rtv_) { rtv_->Release(); rtv_ = nullptr; }
     ID3D11Texture2D* backbuf = nullptr;
     if (SUCCEEDED(swap_->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backbuf))) {
-        device_->CreateRenderTargetView(backbuf, nullptr, &rtv_);
+        if (FAILED(device_->CreateRenderTargetView(backbuf, nullptr, &rtv_)))
+            LOG_WARN("CreateRenderTargetView failed after ResizeBuffers");
         backbuf->Release();
+    } else {
+        LOG_WARN("GetBuffer failed after ResizeBuffers");
     }
 }
 

@@ -54,15 +54,8 @@ private:
     std::atomic<int> next_segment_to_download_{0};
     HANDLE wake_event_ = nullptr;
 
-    struct SegmentData {
-        uint8_t* data = nullptr;
-        size_t size = 0;
-    };
-
-    // Segment buffer (parallel to segments_)
-    CRITICAL_SECTION seg_lock_;
-    std::vector<SegmentData> segment_data_;
     int consumed_up_to_ = 0;
+    CRITICAL_SECTION seg_lock_;
 };
 
 class HlsByteStream : public IMFByteStream {
@@ -92,15 +85,13 @@ public:
 
     // Called by HlsManager
     void AddSegment(const uint8_t* data, size_t size);
-    void SetSegments(const HlsSegment* segs, int count);
     void SetEndOfStream();
     void Clear();
-    bool HasCapability(DWORD cap) const;
     bool CheckAndClearNeedsWake();
     bool HasUnreadData() const;
 
 private:
-    volatile LONG ref_count_ = 1;
+    std::atomic<LONG> ref_count_{1};
     CRITICAL_SECTION lock_;
 
     struct LoadedSeg {

@@ -33,11 +33,11 @@ STDMETHODIMP HlsByteStream::QueryInterface(REFIID riid, void** ppv) {
 }
 
 STDMETHODIMP_(ULONG) HlsByteStream::AddRef() {
-    return InterlockedIncrement(&ref_count_);
+    return (ULONG)ref_count_.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 STDMETHODIMP_(ULONG) HlsByteStream::Release() {
-    LONG r = InterlockedDecrement(&ref_count_);
+    LONG r = ref_count_.fetch_sub(1, std::memory_order_acq_rel) - 1;
     if (r == 0) delete this;
     return r;
 }
@@ -90,14 +90,17 @@ ULONG HlsByteStream::CopyFromSegmentsLocked(BYTE* pb, ULONG cb) {
     while (cb > 0) {
         int seg_idx = -1;
         int64_t offset_in_seg = 0;
-        int64_t remaining = read_pos_;
-        for (int i = 0; i < (int)segs_.size(); i++) {
-            if (remaining < (int64_t)segs_[i].size) {
-                seg_idx = i;
-                offset_in_seg = remaining;
+        int lo = 0, hi = (int)segs_.size() - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            auto& s = segs_[mid];
+            if (read_pos_ >= s.offset && read_pos_ < s.offset + (int64_t)s.size) {
+                seg_idx = mid;
+                offset_in_seg = read_pos_ - s.offset;
                 break;
             }
-            remaining -= segs_[i].size;
+            if (read_pos_ < s.offset) hi = mid - 1;
+            else lo = mid + 1;
         }
         if (seg_idx >= 0 && segs_[seg_idx].data) {
             LoadedSeg& seg = segs_[seg_idx];
@@ -221,6 +224,7 @@ STDMETHODIMP HlsByteStream::EndWrite(IMFAsyncResult*, ULONG*) { return E_NOTIMPL
 STDMETHODIMP HlsByteStream::Seek(MFBYTESTREAM_SEEK_ORIGIN SeekOrigin, LONGLONG llSeekOffset,
                                   DWORD /*dwSeekFlags*/, QWORD* pqwCurrentPosition) {
     EnterCriticalSection(&lock_);
+    CancelPendingRead();
     if (SeekOrigin == 0) {  // MFBYTESTREAM_SEEK_ORIGIN_Begin
         read_pos_ = llSeekOffset;
     } else {
@@ -256,6 +260,7 @@ void HlsByteStream::AddSegment(const uint8_t* data, size_t size) {
 
     LoadedSeg seg;
     seg.data = (uint8_t*)malloc(size);
+    if (!seg.data) { LeaveCriticalSection(&lock_); return; }
     memcpy(seg.data, data, size);
     seg.size = size;
     seg.offset = total_bytes_;
@@ -548,13 +553,12 @@ bool HlsManager::Open(const wchar_t* url) {
 
     LOG_INFO("HLS: First segment: %ws", segments_[0].url.c_str());
 
-    // Allocate segment data buffers
-    EnterCriticalSection(&seg_lock_);
-    segment_data_.resize(segments_.size());
-    LeaveCriticalSection(&seg_lock_);
-
     // Create byte stream
-    byte_stream_ = new HlsByteStream();
+    byte_stream_ = new (std::nothrow) HlsByteStream();
+    if (!byte_stream_) {
+        LOG_ERROR("Out of memory: HlsByteStream");
+        return false;
+    }
 
     // Pre-buffer first 3 segments
     int prebuffer = (std::min)(3, (int)segments_.size());
@@ -625,12 +629,14 @@ void HlsManager::ReloadPlaylist() {
     int added = 0;
     for (auto& ns : parsed) {
         bool found = false;
+        EnterCriticalSection(&seg_lock_);
         for (auto& es : segments_) {
             if (es.url == ns.url) { found = true; break; }
         }
+        if (!found) segments_.push_back(ns);
+        LeaveCriticalSection(&seg_lock_);
         if (found) continue;
 
-        segments_.push_back(ns);
         duration_ += ns.duration;
 
         // Download the new segment
@@ -641,9 +647,6 @@ void HlsManager::ReloadPlaylist() {
         }
 
         byte_stream_->AddSegment(seg_data.data(), seg_data.size());
-        EnterCriticalSection(&seg_lock_);
-        segment_data_.push_back({nullptr, 0});
-        LeaveCriticalSection(&seg_lock_);
         added++;
     }
 
@@ -654,41 +657,45 @@ void HlsManager::ReloadPlaylist() {
 
 void HlsManager::DownloadLoop() {
     while (download_running_) {
-        int idx = next_segment_to_download_;
-        if (idx >= (int)segments_.size()) {
-            if (!is_live_) {
-                byte_stream_->SetEndOfStream();
-                // VOD — wait forever (no more data needed)
-                WaitForSingleObject(wake_event_, INFINITE);
+        int idx = next_segment_to_download_.load(std::memory_order_acquire);
+
+        std::wstring url;
+        {
+            EnterCriticalSection(&seg_lock_);
+            bool has_more = idx < (int)segments_.size();
+            if (has_more) url = segments_[idx].url;
+            LeaveCriticalSection(&seg_lock_);
+            if (!has_more) {
+                if (!is_live_) {
+                    byte_stream_->SetEndOfStream();
+                    WaitForSingleObject(wake_event_, INFINITE);
+                    continue;
+                }
+                // Live — reload playlist and wait for new segments
+                ReloadPlaylist();
+                WaitForSingleObject(wake_event_, (DWORD)(target_duration_ * 1000));
                 continue;
             }
-            // Live — reload playlist and wait for new segments
-            ReloadPlaylist();
-            WaitForSingleObject(wake_event_, (DWORD)(target_duration_ * 1000));
-            continue;
         }
 
         // Check if already downloaded (pre-buffered or previous loop iteration)
         if (idx < consumed_up_to_) {
-            next_segment_to_download_++;
+            next_segment_to_download_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 
         std::vector<uint8_t> seg_data;
-        if (!DownloadUrl(segments_[idx].url.c_str(), seg_data)) {
+        if (!DownloadUrl(url.c_str(), seg_data)) {
             LOG_WARN("HLS: Failed to download segment %d, retrying", idx);
             Sleep(1000);
             continue;
         }
 
         byte_stream_->AddSegment(seg_data.data(), seg_data.size());
-        EnterCriticalSection(&seg_lock_);
-        segment_data_[idx] = {nullptr, 0};  // mark downloaded
-        LeaveCriticalSection(&seg_lock_);
         consumed_up_to_ = idx + 1;
         LOG_INFO("HLS: Segment %d: %zu bytes", idx + 1, seg_data.size());
 
-        next_segment_to_download_ = idx + 1;
+        next_segment_to_download_.store(idx + 1, std::memory_order_release);
     }
 }
 
@@ -696,7 +703,7 @@ void HlsManager::Close() {
     download_running_ = false;
     SetEvent(wake_event_);
     if (download_thread_) {
-        WaitForSingleObject(download_thread_, 5000);
+        WaitForSingleObject(download_thread_, 15000);
         CloseHandle(download_thread_);
         download_thread_ = nullptr;
     }
@@ -705,13 +712,6 @@ void HlsManager::Close() {
         byte_stream_->Release();
         byte_stream_ = nullptr;
     }
-    EnterCriticalSection(&seg_lock_);
-    for (auto& sd : segment_data_) {
-        free(sd.data);
-    }
-    segment_data_.clear();
-    LeaveCriticalSection(&seg_lock_);
-    segments_.clear();
     is_live_ = false;
     duration_ = 0;
 }

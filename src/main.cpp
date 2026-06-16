@@ -50,7 +50,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case VK_RIGHT: {
                     double pos = g_player->GetPosition() + 10.0;
                     double dur = g_player->GetDuration();
-                    g_player->Seek(pos > dur ? dur : pos);
+                    g_player->Seek(dur > 0 && pos > dur ? dur : pos);
                     break;
                 }
                 case VK_ESCAPE:
@@ -117,7 +117,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         rc.right - rc.left, rc.bottom - rc.top,
         nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
 
-    g_player = new Player();
+    g_player = new (std::nothrow) Player();
+    if (!g_player) {
+        MessageBoxA(nullptr, "Out of memory", "Error", MB_OK);
+        return 1;
+    }
     if (!g_player->Open(g_hwnd, url)) {
         MessageBoxA(nullptr, "Failed to open media file", "Error", MB_OK);
         delete g_player; g_player = nullptr;

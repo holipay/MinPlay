@@ -83,15 +83,15 @@ private:
 
     // Frame queue (producer: MF callback, consumer: main thread)
     VFrame vq_[VQ_SIZE];
-    volatile int vq_head_ = 0;
-    volatile int vq_tail_ = 0;
+    std::atomic<int> vq_head_{0};
+    std::atomic<int> vq_tail_{0};
     std::mutex vq_mutex_;
 
     // Render frame buffer
     std::mutex frame_mutex_;
     uint8_t* frame_buf_ = nullptr;
     int frame_buf_size_ = 0;
-    bool frame_ready_ = false;
+    std::atomic<bool> frame_ready_{false};
     int frame_w_ = 0;
     int frame_h_ = 0;
     int frame_size_ = 0;

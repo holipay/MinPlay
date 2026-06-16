@@ -180,7 +180,11 @@ void MediaSource::ReconfigureVideo() {
 }
 
 bool MediaSource::OpenHls(const wchar_t* url) {
-    hls_ = new HlsManager();
+    hls_ = new (std::nothrow) HlsManager();
+    if (!hls_) {
+        LOG_ERROR("Out of memory: HlsManager");
+        return false;
+    }
     if (!hls_->Open(url)) {
         delete hls_; hls_ = nullptr;
         return false;
@@ -192,8 +196,9 @@ bool MediaSource::OpenHls(const wchar_t* url) {
 }
 
 void MediaSource::Close() {
+    if (hls_) hls_->Close();
     reader_.reset();
-    if (hls_) { hls_->Close(); delete hls_; hls_ = nullptr; }
+    if (hls_) { delete hls_; hls_ = nullptr; }
     is_live_ = false;
     has_video_ = false;
     has_audio_ = false;

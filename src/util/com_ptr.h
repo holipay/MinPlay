@@ -23,13 +23,13 @@ public:
         return *this;
     }
     ComPtr& operator=(T* p) {
-        reset(); ptr_ = p;
+        reset(); ptr_ = p; if (ptr_) ptr_->AddRef();
         return *this;
     }
 
     void reset() { if (ptr_) { ptr_->Release(); ptr_ = nullptr; } }
     T* get() const { return ptr_; }
-    T** operator&() { return &ptr_; }
+    T** operator&() { reset(); return &ptr_; }
     T* operator->() const { return ptr_; }
     explicit operator bool() const { return ptr_ != nullptr; }
 
@@ -38,7 +38,7 @@ public:
 
     template<typename U>
     HRESULT As(ComPtr<U>& out) const {
-        return ptr_->QueryInterface(__uuidof(U), (void**)out.GetAddress());
+        return ptr_->QueryInterface(__uuidof(U), (void**)out.ReleaseAndGetAddress());
     }
 
     T** GetAddress() { return &ptr_; }

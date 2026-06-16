@@ -21,11 +21,11 @@ STDMETHODIMP SourceReaderCallback::QueryInterface(REFIID riid, void** ppvObject)
 }
 
 STDMETHODIMP_(ULONG) SourceReaderCallback::AddRef() {
-    return InterlockedIncrement(&ref_count_);
+    return (ULONG)ref_count_.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 STDMETHODIMP_(ULONG) SourceReaderCallback::Release() {
-    LONG count = InterlockedDecrement(&ref_count_);
+    LONG count = ref_count_.fetch_sub(1, std::memory_order_acq_rel) - 1;
     if (count == 0) {
         DeleteCriticalSection(&lock_);
         delete this;
@@ -103,11 +103,11 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
         }
     }
 
-    if (self->running_ && self->reader_) {
+    if (self->running_.load(std::memory_order_acquire) && self->reader_) {
         if (dwStreamIndex == self->audio_stream_ && self->ao_) {
             if (self->ao_->GetFree() > 256 * 1024)
                 self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
-        } else if (dwStreamIndex == self->video_stream_) {
+        } else if (dwStreamIndex == self->video_stream_ && pSample) {
             LONG vp = self->video_pending_.fetch_add(1, std::memory_order_relaxed) + 1;
             if (vp < 2)
                 self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
@@ -120,12 +120,16 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
 STDMETHODIMP SourceReaderCallback::OnReadSample(HRESULT hrStatus, DWORD dwStreamIndex,
                                                   DWORD dwStreamFlags, LONGLONG llTimestamp,
                                                   IMFSample* pSample) {
+    busy_.fetch_add(1, std::memory_order_acq_rel);
+    HRESULT hr;
     __try {
-        return OnReadSampleImpl(this, hrStatus, dwStreamIndex, dwStreamFlags, llTimestamp, pSample);
+        hr = OnReadSampleImpl(this, hrStatus, dwStreamIndex, dwStreamFlags, llTimestamp, pSample);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         LOG_ERROR("OnReadSample SEH: 0x%08lX", GetExceptionCode());
-        return S_OK;
+        hr = S_OK;
     }
+    busy_.fetch_sub(1, std::memory_order_release);
+    return hr;
 }
 
 STDMETHODIMP SourceReaderCallback::OnFlush(DWORD /*dwStreamIndex*/) {
@@ -164,6 +168,9 @@ HRESULT SourceReaderCallback::Stop() {
     EnterCriticalSection(&lock_);
     running_.store(false, std::memory_order_release);
     LeaveCriticalSection(&lock_);
+    // Wait for any in-flight OnReadSample to finish before caller deletes objects
+    while (busy_.load(std::memory_order_acquire) > 0)
+        SwitchToThread();
     return S_OK;
 }
 

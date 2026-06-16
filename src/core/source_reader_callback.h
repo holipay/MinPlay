@@ -31,6 +31,7 @@ public:
     void SetReader(IMFSourceReader* reader, DWORD video_stream, DWORD audio_stream);
     void SetPlayer(Player* player) { player_ = player; }
     void SetAudioOutput(class AudioOutput* ao) { ao_ = ao; }
+    void ClearPointers() { reader_ = nullptr; ao_ = nullptr; player_ = nullptr; }
 
     HRESULT StartReading();
     HRESULT Stop();
@@ -44,7 +45,7 @@ public:
     void ConsumeVideo() { video_pending_.fetch_sub(1, std::memory_order_relaxed); }
 
 private:
-    volatile LONG ref_count_ = 1;
+    std::atomic<LONG> ref_count_{1};
 
     IMFSourceReader* reader_ = nullptr;
     DWORD video_stream_ = (DWORD)-1;
@@ -57,4 +58,5 @@ private:
     std::atomic<bool> video_eof_{false};
     std::atomic<bool> audio_eof_{false};
     std::atomic<LONG> video_pending_{0};
+    std::atomic<LONG> busy_{0};
 };

@@ -6,6 +6,6 @@ public:
     OSD() = default;
     ~OSD() = default;
 
-    void Draw(HDC hdc, int win_w, int win_h,
+    void Draw(HDC hdc, int, int,
               double position, double duration, int fps);
 };

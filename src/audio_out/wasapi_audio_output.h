@@ -54,7 +54,7 @@ private:
     volatile int ring_head_ = 0;
     volatile int ring_tail_ = 0;
 
-    double speed_ = 1.0;
+    std::atomic<double> speed_{1.0};
     double resample_frac_ = 0.0;
 
     uint8_t* tmp_buf_ = nullptr;

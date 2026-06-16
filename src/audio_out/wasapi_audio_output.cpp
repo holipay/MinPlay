@@ -283,6 +283,12 @@ bool WasapiAudioOutput::Initialize(int sample_rate, int channels, int bits) {
 
     tmp_buf_size_ = buffer_frames_ * 2 * in_frame_bytes_;
     tmp_buf_ = (uint8_t*)malloc(tmp_buf_size_);
+    if (!tmp_buf_) {
+        LOG_ERROR("malloc tmp_buf_ failed (%d)", tmp_buf_size_);
+        client_->Stop();
+        playing_ = false;
+        return false;
+    }
 
     playing_ = true;
     thread_ = CreateThread(nullptr, 0, PlaybackThread, this, 0, nullptr);
@@ -339,6 +345,13 @@ void WasapiAudioOutput::Pause() { if (client_) client_->Stop(); }
 void WasapiAudioOutput::Resume() { if (client_) client_->Start(); }
 
 void WasapiAudioOutput::Reset() {
+    playing_ = false;
+    if (event_) SetEvent(event_);
+    if (thread_) {
+        WaitForSingleObject(thread_, INFINITE);
+        CloseHandle(thread_);
+        thread_ = nullptr;
+    }
     if (client_) client_->Stop();
     ring_head_ = 0;
     ring_tail_ = 0;
@@ -348,4 +361,6 @@ void WasapiAudioOutput::Reset() {
     last_write_size_ = 0;
     speed_ = 1.0;
     if (client_) client_->Start();
+    playing_ = true;
+    thread_ = CreateThread(nullptr, 0, PlaybackThread, this, 0, nullptr);
 }
