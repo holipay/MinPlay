@@ -8,7 +8,10 @@ HRESULT D3D11VideoOutput::CompileShader(const char* src, const char* target,
     ID3DBlob* err = nullptr;
     HRESULT hr = D3DCompile(src, strlen(src), nullptr, nullptr, nullptr,
                             "main", target, 0, 0, blob, &err);
-    if (err) { err->Release(); }
+    if (err) {
+        LOG_ERROR("Shader compile failed (%s): %s", target, (const char*)err->GetBufferPointer());
+        err->Release();
+    }
     return hr;
 }
 
@@ -113,10 +116,13 @@ bool D3D11VideoOutput::Initialize(HWND hwnd, int w, int h) {
         return false;
     }
 
-    D3D11_SAMPLER_DESC sd_sam = {D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-        D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE_ADDRESS_CLAMP,
-        D3D11_TEXTURE_ADDRESS_CLAMP,
-        0, 0, D3D11_COMPARISON_NEVER, 0, D3D11_FLOAT32_MAX};
+    D3D11_SAMPLER_DESC sd_sam = {};
+    sd_sam.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sd_sam.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sd_sam.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sd_sam.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sd_sam.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sd_sam.MaxLOD = D3D11_FLOAT32_MAX;
     if (FAILED(device_->CreateSamplerState(&sd_sam, &sam_)) || !sam_) {
         LOG_ERROR("CreateSamplerState failed");
         vbuf_->Release(); vbuf_ = nullptr;
@@ -303,6 +309,7 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
 
 void D3D11VideoOutput::Resize(int w, int h) {
     if (!swap_) return;
+    if (w <= 0 || h <= 0) return;
     if (win_w_ == w && win_h_ == h) return;
 
     HRESULT hr = swap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);

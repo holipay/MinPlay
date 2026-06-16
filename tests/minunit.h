@@ -25,9 +25,10 @@ extern int assertions_failed;
 #define MU_CHECK_DBL(a, b, eps) MU_ASSERT(fabs((a) - (b)) < (eps), "expected " #a " ≈ " #b)
 
 #define MU_RUN_TEST(test) do { \
+    int _fail_before = assertions_failed; \
     fprintf(stderr, "  %s ... ", #test); \
     test(); \
-    fprintf(stderr, "OK\n"); \
+    fprintf(stderr, "%s\n", assertions_failed > _fail_before ? "FAIL" : "OK"); \
 } while(0)
 
 #define MU_RUN_SUITE(suite) do { \

@@ -171,6 +171,10 @@ DWORD WINAPI WasapiAudioOutput::PlaybackThread(LPVOID arg) {
 bool WasapiAudioOutput::Initialize(int sample_rate, int channels, int bits) {
     LOG_INFO("WASAPI Initialize: %d Hz, %d ch, %d bit", sample_rate, channels, bits);
 
+    if (channels <= 0 || bits <= 0) {
+        LOG_ERROR("Invalid audio params: channels=%d bits=%d", channels, bits);
+        return false;
+    }
     in_rate_ = sample_rate;
     in_channels_ = channels;
     in_bits_ = bits;

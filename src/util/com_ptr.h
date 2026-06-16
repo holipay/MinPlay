@@ -23,7 +23,7 @@ public:
         return *this;
     }
     ComPtr& operator=(T* p) {
-        reset(); ptr_ = p; if (ptr_) ptr_->AddRef();
+        if (p != ptr_) { reset(); ptr_ = p; if (ptr_) ptr_->AddRef(); }
         return *this;
     }
 
@@ -54,6 +54,10 @@ class ComInit {
     HRESULT hr_;
 public:
     explicit ComInit(DWORD mode = COINIT_MULTITHREADED) : hr_(CoInitializeEx(nullptr, mode)) {}
+    ComInit(const ComInit&) = delete;
+    ComInit& operator=(const ComInit&) = delete;
+    ComInit(ComInit&&) = delete;
+    ComInit& operator=(ComInit&&) = delete;
     ~ComInit() { if (SUCCEEDED(hr_)) CoUninitialize(); }
     bool Succeeded() const { return SUCCEEDED(hr_); }
 };

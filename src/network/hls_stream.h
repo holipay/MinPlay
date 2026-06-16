@@ -56,7 +56,7 @@ private:
     std::atomic<int> next_segment_to_download_{0};
     HANDLE wake_event_ = nullptr;
 
-    int consumed_up_to_ = 0;
+    std::atomic<int> consumed_up_to_{0};
     bool eos_sent_ = false;
     CRITICAL_SECTION seg_lock_;
 };

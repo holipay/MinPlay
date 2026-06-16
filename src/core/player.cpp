@@ -177,13 +177,13 @@ void Player::Close() {
     if (source_) { source_->Close(); delete source_; source_ = nullptr; }
     if (callback_) { callback_->Release(); callback_ = nullptr; }
 
+    state_.store(PlayerState::Stopped, std::memory_order_release);
     for (int i = 0; i < VQ_SIZE; i++) {
         free(vq_[i].data);
         vq_[i].data = nullptr;
     }
     free(frame_buf_);
     frame_buf_ = nullptr;
-    state_.store(PlayerState::Stopped, std::memory_order_release);
 }
 
 void Player::Play() {

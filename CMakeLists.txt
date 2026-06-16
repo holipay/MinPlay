@@ -67,6 +67,13 @@ if(BUILD_TESTS)
     target_link_libraries(MinPlayTests PRIVATE
         ole32
         oleaut32
+        winhttp
+        shlwapi
+        mf
+        mfplat
+        mfreadwrite
+        mfuuid
+        uuid
         avrt
     )
 

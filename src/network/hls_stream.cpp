@@ -20,7 +20,7 @@ struct WinHttpHandle {
         return *this;
     }
     void reset(HINTERNET h_ = nullptr) { if (h) WinHttpCloseHandle(h); h = h_; }
-    HINTERNET* operator&() { return &h; }
+    HINTERNET* operator&() { reset(); return &h; }
     operator HINTERNET() const { return h; }
     explicit operator bool() const { return h != nullptr; }
 };
@@ -270,9 +270,9 @@ STDMETHODIMP HlsByteStream::Seek(MFBYTESTREAM_SEEK_ORIGIN SeekOrigin, LONGLONG l
                                   DWORD /*dwSeekFlags*/, QWORD* pqwCurrentPosition) {
     EnterCriticalSection(&lock_);
     CancelPendingReadsLocked();
-    if (SeekOrigin == 0) {  // MFBYTESTREAM_SEEK_ORIGIN_Begin
+    if (SeekOrigin == 0) {  // MFBYTESTREAM_SEEK_ORIGIN_BEGIN
         read_pos_ = llSeekOffset;
-    } else {
+    } else {  // MFBYTESTREAM_SEEK_ORIGIN_CURRENT (only two origins defined in SDK)
         read_pos_ = read_pos_ + llSeekOffset;
     }
     if (read_pos_ < 0) read_pos_ = 0;
@@ -713,7 +713,7 @@ bool HlsManager::Open(const wchar_t* url) {
             continue;
         }
         byte_stream_->AddSegment(seg_data.data(), seg_data.size());
-        consumed_up_to_ = i + 1;
+        consumed_up_to_.store(i + 1, std::memory_order_release);
         LOG_INFO("HLS: Segment %d: %zu bytes", i + 1, seg_data.size());
     }
 
@@ -806,7 +806,7 @@ void HlsManager::ReloadPlaylist() {
         int new_size = (int)segments_.size();
         LeaveCriticalSection(&seg_lock_);
         next_segment_to_download_.store(new_size, std::memory_order_release);
-        consumed_up_to_ = new_size;
+        consumed_up_to_.store(new_size, std::memory_order_release);
     }
 }
 
@@ -849,7 +849,7 @@ void HlsManager::DownloadLoop() {
         }
 
         // Check if already downloaded (pre-buffered or previous loop iteration)
-        if (idx < consumed_up_to_) {
+        if (idx < consumed_up_to_.load(std::memory_order_acquire)) {
             next_segment_to_download_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
@@ -871,7 +871,7 @@ void HlsManager::DownloadLoop() {
         retry_count = 0;
 
         byte_stream_->AddSegment(seg_data.data(), seg_data.size());
-        consumed_up_to_ = idx + 1;
+        consumed_up_to_.store(idx + 1, std::memory_order_release);
         LOG_INFO("HLS: Segment %d: %zu bytes", idx + 1, seg_data.size());
 
         next_segment_to_download_.store(idx + 1, std::memory_order_release);
@@ -895,6 +895,7 @@ void HlsManager::Close() {
     }
     is_live_ = false;
     duration_ = 0;
+    eos_sent_ = false;
 }
 
 HlsByteStream* HlsManager::GetByteStream() {

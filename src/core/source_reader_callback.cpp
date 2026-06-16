@@ -34,6 +34,12 @@ STDMETHODIMP_(ULONG) SourceReaderCallback::Release() {
     return (ULONG)count;
 }
 
+// Defensive null-checks after running_ drops to false — in case Stop() timeout
+// allowed OnReadSampleImpl to start past the running_ gate.
+#define CHECK_READER(msg) do { if (!self->reader_) { LOG_WARN("OnReadSample: reader_ null " msg); return S_OK; } } while(0)
+#define CHECK_AO(msg)     do { if (!self->ao_)     { LOG_WARN("OnReadSample: ao_ null " msg);     return S_OK; } } while(0)
+#define CHECK_PLAYER(msg) do { if (!self->player_) { LOG_WARN("OnReadSample: player_ null " msg); return S_OK; } } while(0)
+
 STDMETHODIMP SourceReaderCallback::OnEvent(DWORD /*dwStreamIndex*/, IMFMediaEvent* /*pEvent*/) {
     return S_OK;
 }
@@ -46,10 +52,10 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
     if (FAILED(hrStatus) || (dwStreamFlags & MF_SOURCE_READERF_ERROR)) {
         LOG_WARN("OnReadSample failed stream=%lu hr=0x%08lX flags=0x%08lX",
                  dwStreamIndex, hrStatus, dwStreamFlags);
-        if (self->reader_) {
-            self->reader_->Flush(dwStreamIndex);
-        }
-        if (self->player_ && self->player_->GetHwnd())
+        CHECK_READER("error flush");
+        self->reader_->Flush(dwStreamIndex);
+        CHECK_PLAYER("error post");
+        if (self->player_->GetHwnd())
             PostMessage(self->player_->GetHwnd(), WM_TIMER,
                         dwStreamIndex == self->video_stream_ ? TIMER_VIDEO_DISPLAY : TIMER_AUDIO_CHECK, 0);
         return S_OK;
@@ -66,7 +72,8 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
 
     if (dwStreamFlags & MF_SOURCE_READERF_STREAMTICK) {
         // Gap in the stream — re-request to continue reading
-        if (self->running_.load(std::memory_order_acquire) && self->reader_)
+        CHECK_READER("stream tick");
+        if (self->running_.load(std::memory_order_acquire))
             self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
         return S_OK;
     }
@@ -74,7 +81,8 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
     // Handle media type changes (adaptive bitrate)
     if (dwStreamFlags & MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED) {
         LOG_INFO("Native media type changed stream=%lu", dwStreamIndex);
-        if (dwStreamIndex == self->video_stream_ && self->reader_) {
+        CHECK_READER("native type changed");
+        if (dwStreamIndex == self->video_stream_) {
             // Re-set our preferred output format
             ComPtr<IMFMediaType> mt;
             MFCreateMediaType(&mt);
@@ -95,11 +103,13 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
 
     if (dwStreamFlags & (MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED |
                          MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED)) {
-        if (self->player_) self->player_->OnVideoFormatChanged();
+        CHECK_PLAYER("format changed");
+        self->player_->OnVideoFormatChanged();
     }
 
     if (pSample) {
-        if (dwStreamIndex == self->audio_stream_ && self->ao_) {
+        if (dwStreamIndex == self->audio_stream_) {
+            CHECK_AO("audio sample");
             ComPtr<IMFMediaBuffer> buf;
             if (SUCCEEDED(pSample->ConvertToContiguousBuffer(&buf))) {
                 BYTE* data = nullptr;
@@ -110,13 +120,16 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
                     buf->Unlock();
                 }
             }
-        } else if (dwStreamIndex == self->video_stream_ && self->player_) {
+        } else if (dwStreamIndex == self->video_stream_) {
+            CHECK_PLAYER("video sample");
             self->player_->ProcessVideoFrame(pSample, llTimestamp);
         }
     }
 
-    if (self->running_.load(std::memory_order_acquire) && self->reader_) {
-        if (dwStreamIndex == self->audio_stream_ && self->ao_) {
+    if (self->running_.load(std::memory_order_acquire)) {
+        CHECK_READER("re-request");
+        if (dwStreamIndex == self->audio_stream_) {
+            CHECK_AO("audio re-request");
             if (self->ao_->GetFree() > 256 * 1024)
                 self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
         } else if (dwStreamIndex == self->video_stream_ && pSample) {
@@ -125,7 +138,7 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
                 self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
         } else if (dwStreamIndex == self->video_stream_ && !pSample &&
                    (dwStreamFlags & (MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED |
-                                     MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED))) {
+                                      MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED))) {
             // Type change without a sample — re-request to keep pipeline primed
             self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
         }
@@ -137,6 +150,7 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
 STDMETHODIMP SourceReaderCallback::OnReadSample(HRESULT hrStatus, DWORD dwStreamIndex,
                                                   DWORD dwStreamFlags, LONGLONG llTimestamp,
                                                   IMFSample* pSample) {
+    AddRef();  // keep self alive — caller may Release while we're busy
     busy_.fetch_add(1, std::memory_order_acq_rel);
     HRESULT hr;
     __try {
@@ -146,6 +160,7 @@ STDMETHODIMP SourceReaderCallback::OnReadSample(HRESULT hrStatus, DWORD dwStream
         hr = S_OK;
     }
     busy_.fetch_sub(1, std::memory_order_release);
+    Release();
     return hr;
 }
 
