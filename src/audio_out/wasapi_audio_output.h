@@ -17,7 +17,7 @@ public:
     bool Initialize(int sample_rate, int channels, int bits);
 
     void Write(const uint8_t* data, int size) override;
-    void SetPts(double pts) override { last_write_pts_ = pts; }
+    void SetPts(double pts) override { last_write_pts_.store(pts, std::memory_order_relaxed); }
     double GetClock() override;
     int GetBuffered() override;
     int GetFree() override;
@@ -61,8 +61,7 @@ private:
     int tmp_buf_size_ = 0;
 
     std::atomic<int64_t> total_bytes_written_{0};
-    double last_write_pts_ = 0.0;
-    int last_write_size_ = 0;
+    std::atomic<double> last_write_pts_{0.0};
 
     int RingAvail() const;
     int RingFree() const;

@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 #include <new>
 
 Player::Player() {
@@ -61,7 +62,7 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
         VideoInfo vi = source_->GetVideoInfo();
         frame_w_ = vi.width;
         frame_h_ = vi.height;
-        video_fps_ = vi.fps;
+        video_fps_.store(vi.fps, std::memory_order_relaxed);
     }
 
     if (has_audio_) {
@@ -148,7 +149,7 @@ void Player::Destroy() {
 
 void Player::Play() {
     if (!source_) return;
-    state_ = PlayerState::Playing;
+    state_.store(PlayerState::Playing, std::memory_order_release);
     start_time_ = GetTimeSec(perf_freq_);
     pause_offset_ = 0;
 
@@ -158,19 +159,19 @@ void Player::Play() {
 }
 
 void Player::PauseToggle() {
-    if (state_ == PlayerState::Playing) {
-        state_ = PlayerState::Paused;
+    if (state_.load(std::memory_order_acquire) == PlayerState::Playing) {
+        state_.store(PlayerState::Paused, std::memory_order_release);
         pause_start_ = GetTimeSec(perf_freq_);
         if (callback_) callback_->Stop();
         if (ao_) ao_->Pause();
         KillTimer(hwnd_, TIMER_VIDEO_DISPLAY);
-    } else if (state_ == PlayerState::Paused) {
-        state_ = PlayerState::Playing;
+    } else if (state_.load(std::memory_order_acquire) == PlayerState::Paused) {
+        state_.store(PlayerState::Playing, std::memory_order_release);
         pause_offset_ += GetTimeSec(perf_freq_) - pause_start_;
         if (ao_) ao_->Resume();
         if (callback_) callback_->StartReading();
         if (has_video_) {
-            double fps = video_fps_ > 0 ? video_fps_ : 30.0;
+            double fps = video_fps_.load(std::memory_order_acquire) > 0 ? video_fps_.load(std::memory_order_acquire) : 30.0;
             int period = (int)(1000.0 / fps);
             if (period < 1) period = 1;
             SetTimer(hwnd_, TIMER_VIDEO_DISPLAY, period, nullptr);
@@ -183,7 +184,7 @@ void Player::Seek(double seconds) {
     if (!source_) return;
     if (source_->IsLive()) return;
     if (seconds < 0) seconds = 0;
-    bool was_playing = (state_ == PlayerState::Playing);
+    bool was_playing = (state_.load(std::memory_order_acquire) == PlayerState::Playing);
 
     if (callback_) callback_->Stop();
     if (ao_) ao_->Reset();
@@ -202,7 +203,7 @@ void Player::Seek(double seconds) {
     }
 
     if (was_playing) {
-        state_ = PlayerState::Playing;
+        state_.store(PlayerState::Playing, std::memory_order_release);
         start_time_ = GetTimeSec(perf_freq_) - seconds;
         pause_offset_ = 0;
         video_first_frame_post_.store(1, std::memory_order_release);
@@ -234,8 +235,17 @@ void Player::Paint(HDC /*hdc*/, int /*w*/, int /*h*/) {
 
 bool Player::IsFinished() const {
     if (source_ && source_->IsLive()) return false;
-    bool vq_empty = (vq_head_.load(std::memory_order_relaxed) == vq_tail_.load(std::memory_order_relaxed));
-    bool vdone  = !has_video_ || (callback_ && callback_->IsVideoEof() && vq_empty && !frame_ready_);
+    bool vq_empty;
+    {
+        std::lock_guard<std::mutex> lock(vq_mutex_);
+        vq_empty = (vq_head_.load(std::memory_order_relaxed) == vq_tail_.load(std::memory_order_relaxed));
+    }
+    bool f_ready;
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        f_ready = frame_ready_;
+    }
+    bool vdone  = !has_video_ || (callback_ && callback_->IsVideoEof() && vq_empty && !f_ready);
     bool adone  = !has_audio_ || (callback_ && callback_->IsAudioEof() && ao_ && ao_->GetBuffered() == 0);
     return vdone && adone;
 }
@@ -244,8 +254,8 @@ uint8_t* Player::ConvertYUY2ToNV12(const uint8_t* yuy2, int w, int h) {
     // YUY2: 2 pixels per 4 bytes. Clamp to even width to avoid OOB on odd widths.
     w &= ~1;
     if (w < 2) return nullptr;
-    int y_size = w * h;
-    int nv12_size = y_size + y_size / 2;
+    size_t y_size = (size_t)w * h;
+    size_t nv12_size = y_size + y_size / 2;
     uint8_t* nv12 = (uint8_t*)malloc(nv12_size);
     if (!nv12) return nullptr;
 
@@ -267,8 +277,8 @@ uint8_t* Player::ConvertYUY2ToNV12(const uint8_t* yuy2, int w, int h) {
 }
 
 uint8_t* Player::ConvertI420ToNV12(const uint8_t* i420, int w, int h) {
-    int y_size = w * h;
-    int nv12_size = y_size + y_size / 2;
+    size_t y_size = (size_t)w * h;
+    size_t nv12_size = y_size + y_size / 2;
     uint8_t* nv12 = (uint8_t*)malloc(nv12_size);
     if (!nv12) return nullptr;
 
@@ -287,10 +297,9 @@ uint8_t* Player::ConvertI420ToNV12(const uint8_t* i420, int w, int h) {
 }
 
 void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
-    // video_pending_ was already incremented in OnReadSampleImpl.
-    // Every early return before enqueue must ConsumeVideo() to balance it.
+    // ConsumeVideo() balances fetch_add in StartReading / RequestVideoRead / re-request.
     if (!sample) return;
-    if (state_ != PlayerState::Playing) {
+    if (state_.load(std::memory_order_acquire) != PlayerState::Playing) {
         if (callback_) callback_->ConsumeVideo();
         return;
     }
@@ -309,7 +318,7 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     }
 
     const uint8_t* frame_data = data;
-    int frame_size = (int)cur_len_dw;
+    int frame_size = (int)(std::min)(cur_len_dw, (DWORD)INT_MAX);
     uint8_t* converted = nullptr;
 
     // Read frame dimensions + format under vq_mutex_ (same lock as VideoTick)
@@ -324,10 +333,12 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 
     if (vq_fmt == PixelFormat::YUY2 && fw > 0 && fh > 0) {
         converted = ConvertYUY2ToNV12(data, fw, fh);
-        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; frame_size = fw * fh * 3 / 2; }
+        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; frame_size = (int)((size_t)fw * fh * 3 / 2); }
+        else { buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
     } else if (vq_fmt == PixelFormat::I420 && fw > 0 && fh > 0) {
         converted = ConvertI420ToNV12(data, fw, fh);
-        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; frame_size = fw * fh * 3 / 2; }
+        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; frame_size = (int)((size_t)fw * fh * 3 / 2); }
+        else { buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
     }
 
     bool was_empty;
@@ -370,7 +381,7 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 }
 
 void Player::VideoTick() {
-    if (state_ != PlayerState::Playing) return;
+    if (state_.load(std::memory_order_acquire) != PlayerState::Playing) return;
 
     // Live HLS: if a stream stalled and new data arrived, restart the pipeline
     if (source_ && source_->IsLive() &&
@@ -482,11 +493,12 @@ void Player::OnVideoFormatChanged() {
         std::lock_guard<std::mutex> lock(vq_mutex_);
         if (vi.width > 0) frame_w_ = vi.width;
         if (vi.height > 0) frame_h_ = vi.height;
-        if (vi.fps > 0) video_fps_ = vi.fps;
+        if (vi.fps > 0) video_fps_.store(vi.fps, std::memory_order_relaxed);
         pix_fmt_ = fmt;
     }
     LOG_INFO("Player video format updated: %dx%d @ %.1f fps",
-             frame_w_, frame_h_, video_fps_);
+             frame_w_.load(std::memory_order_relaxed), frame_h_.load(std::memory_order_relaxed),
+             video_fps_.load(std::memory_order_relaxed));
 }
 
 void Player::RenderD3D(int w, int h) {
@@ -500,7 +512,7 @@ void Player::RenderD3D(int w, int h) {
 }
 
 void Player::CheckAudio() {
-    if (state_ != PlayerState::Playing) return;
+    if (state_.load(std::memory_order_acquire) != PlayerState::Playing) return;
 
     // Live HLS: if pipeline stalled and new data arrived, restart
     if (source_ && source_->IsLive() &&
@@ -516,6 +528,8 @@ void Player::CheckAudio() {
             start_time_ = GetTimeSec(perf_freq_);
             pause_offset_ = 0;
             if (sync_) sync_->Seek();
+            callback_->RequestVideoRead();
+            callback_->RequestAudioRead();
         }
     }
 

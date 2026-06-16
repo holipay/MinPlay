@@ -70,8 +70,29 @@ STDMETHODIMP HlsByteStream::GetCurrentPosition(QWORD* pqwPosition) {
     return S_OK;
 }
 
+void HlsByteStream::CancelPendingReadsLocked() {
+    std::vector<PendingRead> to_cancel;
+    to_cancel.swap(pending_reads_);
+
+    for (auto& pr : to_cancel) {
+        async_result_ = 0;
+        async_hr_ = E_ABORT;
+        LeaveCriticalSection(&lock_);
+
+        ComPtr<IMFAsyncResult> result;
+        if (SUCCEEDED(MFCreateAsyncResult(nullptr, pr.cb, pr.state, &result))) {
+            MFInvokeCallback(result.get());
+        }
+        pr.cb->Release();
+        if (pr.state) pr.state->Release();
+
+        EnterCriticalSection(&lock_);
+    }
+}
+
 STDMETHODIMP HlsByteStream::SetCurrentPosition(QWORD qwPosition) {
     EnterCriticalSection(&lock_);
+    CancelPendingReadsLocked();
     read_pos_ = (int64_t)qwPosition;
     LeaveCriticalSection(&lock_);
     return S_OK;
@@ -80,7 +101,7 @@ STDMETHODIMP HlsByteStream::SetCurrentPosition(QWORD qwPosition) {
 STDMETHODIMP HlsByteStream::IsEndOfStream(BOOL* pfEndOfStream) {
     if (!pfEndOfStream) return E_POINTER;
     EnterCriticalSection(&lock_);
-    *pfEndOfStream = has_eos_marker_ ? TRUE : FALSE;
+    *pfEndOfStream = (has_eos_marker_ && read_pos_ >= total_bytes_) ? TRUE : FALSE;
     LeaveCriticalSection(&lock_);
     return S_OK;
 }
@@ -118,47 +139,13 @@ ULONG HlsByteStream::CopyFromSegmentsLocked(BYTE* pb, ULONG cb) {
     return total_read;
 }
 
-// Assumes lock_ held. Releases lock_ before invoking callback to avoid re-entrancy.
-void HlsByteStream::CompleteAsync(HRESULT hr, ULONG bytesRead) {
-    async_result_ = bytesRead;
-    async_hr_ = hr;
-    async_pending_ = false;
 
-    IMFAsyncCallback* cb = async_cb_;
-    IUnknown* st = async_state_;
-    async_cb_ = nullptr;
-    async_state_ = nullptr;
-    async_buf_ = nullptr;
-    async_size_ = 0;
-
-    LeaveCriticalSection(&lock_);
-
-    if (cb) {
-        ComPtr<IMFAsyncResult> result;
-        if (SUCCEEDED(MFCreateAsyncResult(nullptr, cb, st, &result))) {
-            MFInvokeCallback(result.get());
-        }
-        cb->Release();
-    }
-    if (st) st->Release();
-}
-
-// Assumes lock_ held. Clears pending without invoking callback (safe during shutdown).
-void HlsByteStream::CancelPendingRead() {
-    if (async_pending_) {
-        async_pending_ = false;
-        if (async_cb_) { async_cb_->Release(); async_cb_ = nullptr; }
-        if (async_state_) { async_state_->Release(); async_state_ = nullptr; }
-        async_buf_ = nullptr;
-        async_size_ = 0;
-    }
-}
 
 STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
-    if (closed_) return E_ABORT;
     if (!pb) return E_POINTER;
 
     EnterCriticalSection(&lock_);
+    if (closed_) { LeaveCriticalSection(&lock_); return E_ABORT; }
     ULONG total_read = CopyFromSegmentsLocked(pb, cb);
 
     // If nothing read and EOS marker set, signal end
@@ -176,40 +163,38 @@ STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
 }
 
 STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCallback, IUnknown* pState) {
-    if (closed_) return E_ABORT;
     if (!pb || !pCallback) return E_POINTER;
 
     EnterCriticalSection(&lock_);
-    if (async_pending_) CancelPendingRead();
+    if (closed_) { LeaveCriticalSection(&lock_); return E_ABORT; }
     ULONG bytesRead = CopyFromSegmentsLocked(pb, cb);
+    bool is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
 
-    // For live streams: if no data and not EOS, defer completion via E_PENDING.
-    // MF will hold the request; AddSegment later fulfills it via CompleteAsync.
-    if (bytesRead == 0 && !(has_eos_marker_ && read_pos_ >= total_bytes_)) {
-        async_buf_ = pb;
-        async_size_ = cb;
-        async_pending_ = true;
-        async_cb_ = pCallback;
-        pCallback->AddRef();
-        async_state_ = pState;
-        if (pState) pState->AddRef();
+    if (bytesRead > 0 || is_eos) {
+        async_result_ = bytesRead;
+        async_hr_ = is_eos ? S_FALSE : S_OK;
         LeaveCriticalSection(&lock_);
-        return E_PENDING;
+
+        pCallback->AddRef();
+        if (pState) pState->AddRef();
+        ComPtr<IMFAsyncResult> result;
+        HRESULT hr = MFCreateAsyncResult(nullptr, pCallback, pState, &result);
+        pCallback->Release();
+        if (pState) pState->Release();
+        if (FAILED(hr)) return hr;
+        return MFInvokeCallback(result.get());
     }
 
-    async_result_ = bytesRead;
-    bool is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
-    async_hr_ = is_eos ? S_FALSE : S_OK;
-    LeaveCriticalSection(&lock_);
-
+    PendingRead pr;
+    pr.buf = pb;
+    pr.size = cb;
+    pr.cb = pCallback;
+    pr.state = pState;
     pCallback->AddRef();
     if (pState) pState->AddRef();
-    ComPtr<IMFAsyncResult> result;
-    HRESULT hr = MFCreateAsyncResult(nullptr, pCallback, pState, &result);
-    pCallback->Release();
-    if (pState) pState->Release();
-    if (FAILED(hr)) return hr;
-    return MFInvokeCallback(result.get());
+    pending_reads_.push_back(pr);
+    LeaveCriticalSection(&lock_);
+    return E_PENDING;
 }
 
 STDMETHODIMP HlsByteStream::EndRead(IMFAsyncResult* /*pResult*/, ULONG* pcbRead) {
@@ -224,7 +209,7 @@ STDMETHODIMP HlsByteStream::EndWrite(IMFAsyncResult*, ULONG*) { return E_NOTIMPL
 STDMETHODIMP HlsByteStream::Seek(MFBYTESTREAM_SEEK_ORIGIN SeekOrigin, LONGLONG llSeekOffset,
                                   DWORD /*dwSeekFlags*/, QWORD* pqwCurrentPosition) {
     EnterCriticalSection(&lock_);
-    CancelPendingRead();
+    CancelPendingReadsLocked();
     if (SeekOrigin == 0) {  // MFBYTESTREAM_SEEK_ORIGIN_Begin
         read_pos_ = llSeekOffset;
     } else {
@@ -240,7 +225,7 @@ STDMETHODIMP HlsByteStream::Flush() { return S_OK; }
 
 STDMETHODIMP HlsByteStream::Close() {
     EnterCriticalSection(&lock_);
-    CancelPendingRead();
+    CancelPendingReadsLocked();
     closed_ = true;
     for (auto& s : segs_) {
         free(s.data);
@@ -270,14 +255,35 @@ void HlsByteStream::AddSegment(const uint8_t* data, size_t size) {
 
     needs_wake_.store(1, std::memory_order_release);
 
-    // Fulfill any pending async read with the new data
-    if (async_pending_) {
-        ULONG n = CopyFromSegmentsLocked(async_buf_, async_size_);
-        CompleteAsync(S_OK, n);
-        return;  // lock released by CompleteAsync
-    }
+    FulfillPendingReads();
+}
 
-    LeaveCriticalSection(&lock_);
+void HlsByteStream::FulfillPendingReads() {
+    std::vector<PendingRead> to_fulfill;
+    to_fulfill.swap(pending_reads_);
+
+    for (auto& pr : to_fulfill) {
+        ULONG n = CopyFromSegmentsLocked(pr.buf, pr.size);
+        bool is_eos = (n == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
+
+        if (n == 0 && !is_eos) {
+            pending_reads_.push_back(pr);
+            continue;
+        }
+
+        async_result_ = n;
+        async_hr_ = is_eos ? S_FALSE : S_OK;
+        LeaveCriticalSection(&lock_);
+
+        ComPtr<IMFAsyncResult> result;
+        if (SUCCEEDED(MFCreateAsyncResult(nullptr, pr.cb, pr.state, &result))) {
+            MFInvokeCallback(result.get());
+        }
+        pr.cb->Release();
+        if (pr.state) pr.state->Release();
+
+        EnterCriticalSection(&lock_);
+    }
 }
 
 bool HlsByteStream::CheckAndClearNeedsWake() {
@@ -285,13 +291,12 @@ bool HlsByteStream::CheckAndClearNeedsWake() {
 }
 
 bool HlsByteStream::HasUnreadData() const {
-    // lock-free: volatile read_pos_/total_bytes_ — safe rough check
-    return read_pos_ < total_bytes_;
+    return read_pos_.load(std::memory_order_acquire) < total_bytes_.load(std::memory_order_acquire);
 }
 
 void HlsByteStream::Clear() {
     EnterCriticalSection(&lock_);
-    CancelPendingRead();
+    CancelPendingReadsLocked();
     for (auto& s : segs_) {
         free(s.data);
         s.data = nullptr;
@@ -307,10 +312,25 @@ void HlsByteStream::Clear() {
 void HlsByteStream::SetEndOfStream() {
     EnterCriticalSection(&lock_);
     has_eos_marker_ = true;
-    if (async_pending_) {
-        CompleteAsync(S_FALSE, 0);
-        return;
+
+    std::vector<PendingRead> to_fulfill;
+    to_fulfill.swap(pending_reads_);
+
+    for (auto& pr : to_fulfill) {
+        async_result_ = 0;
+        async_hr_ = S_FALSE;
+        LeaveCriticalSection(&lock_);
+
+        ComPtr<IMFAsyncResult> result;
+        if (SUCCEEDED(MFCreateAsyncResult(nullptr, pr.cb, pr.state, &result))) {
+            MFInvokeCallback(result.get());
+        }
+        pr.cb->Release();
+        if (pr.state) pr.state->Release();
+
+        EnterCriticalSection(&lock_);
     }
+
     LeaveCriticalSection(&lock_);
 }
 
@@ -406,11 +426,44 @@ std::wstring HlsManager::ResolveUrl(const std::wstring& base, const std::wstring
     if (relative.find(L"://") != std::wstring::npos)
         return relative;
 
-    // Extract base directory from base URL
-    size_t slash = base.rfind(L'/');
-    if (slash != std::wstring::npos)
-        return base.substr(0, slash + 1) + relative;
-    return base + L"/" + relative;
+    // Strip query string from base URL
+    std::wstring clean(base, 0, base.find(L'?'));
+
+    if (!relative.empty() && relative[0] == L'/') {
+        // Absolute path — replace path after host
+        size_t p = clean.find(L"://");
+        if (p != std::wstring::npos) {
+            p = clean.find(L'/', p + 3);
+            if (p != std::wstring::npos)
+                return clean.substr(0, p) + relative;
+        }
+        return clean + relative;
+    }
+
+    // Base directory
+    size_t slash = clean.rfind(L'/');
+    std::wstring result = (slash != std::wstring::npos)
+        ? clean.substr(0, slash + 1) + relative
+        : clean + L"/" + relative;
+
+    // Normalize ./ and ../
+    for (;;) {
+        size_t dotdot = result.find(L"/../");
+        if (dotdot == std::wstring::npos) break;
+        if (dotdot == 0) { result.erase(0, 4); continue; }
+        size_t prev = result.rfind(L'/', dotdot - 1);
+        if (prev == std::wstring::npos) prev = 0;
+        result.erase(prev, dotdot - prev + 4);
+    }
+    if (result.size() >= 3 && result.substr(result.size() - 3) == L"/..") {
+        size_t prev = result.rfind(L'/', result.size() - 4);
+        if (prev == std::wstring::npos) prev = 0;
+        result.erase(prev);
+    }
+    for (size_t p = result.find(L"/./"); p != std::wstring::npos; p = result.find(L"/./", p))
+        result.erase(p, 2);
+
+    return result;
 }
 
 bool HlsManager::ParseMasterPlaylist(const std::string& content, const std::wstring& base_url) {
@@ -435,7 +488,7 @@ bool HlsManager::ParseMasterPlaylist(const std::string& content, const std::wstr
                     std::string val = stream_info.substr(pos + 10);
                     auto end = val.find_first_of(", \r\n");
                     if (end != std::string::npos) val = val.substr(0, end);
-                    bw = std::stoi(val);
+                    try { bw = std::stoi(val); } catch (...) { bw = 0; }
                 }
                 if (bw > best_bw) {
                     best_bw = bw;
@@ -478,11 +531,11 @@ bool HlsManager::ParseMediaPlaylist(const std::string& content, const std::wstri
             auto comma = val.find(',');
             if (comma != std::string::npos)
                 val = val.substr(0, comma);
-            current_duration = std::stod(val);
+            try { current_duration = std::stod(val); } catch (...) { current_duration = 0; }
         } else if (line.substr(0, 22) == "#EXT-X-TARGETDURATION:") {
-            target_duration_ = std::stoi(line.substr(22));
+            try { target_duration_ = std::stoi(line.substr(22)); } catch (...) { target_duration_ = 0; }
         } else if (line.substr(0, 22) == "#EXT-X-MEDIA-SEQUENCE:") {
-            media_sequence_ = std::stoi(line.substr(22));
+            try { media_sequence_ = std::stoi(line.substr(22)); } catch (...) { media_sequence_ = 0; }
         } else if (line == "#EXT-X-ENDLIST") {
             is_live_ = false;
         } else if (line.substr(0, 11) == "#EXT-X-KEY:") {
@@ -500,12 +553,10 @@ bool HlsManager::ParseMediaPlaylist(const std::string& content, const std::wstri
         }
     }
 
-    duration_ = 0;
-    for (auto& s : segments_)
-        duration_ += s.duration;
+    { double d = 0; for (auto& s : segments_) d += s.duration; duration_.store(d, std::memory_order_relaxed); }
 
     LOG_INFO("HLS: %d segments, %.1f s, %s",
-             (int)segments_.size(), duration_, is_live_ ? "LIVE" : "VOD");
+             (int)segments_.size(), duration_.load(std::memory_order_relaxed), is_live_.load(std::memory_order_relaxed) ? "LIVE" : "VOD");
     return !segments_.empty();
 }
 
@@ -608,9 +659,9 @@ void HlsManager::ReloadPlaylist() {
                 std::string val = line.substr(8);
                 auto comma = val.find(',');
                 if (comma != std::string::npos) val = val.substr(0, comma);
-                current_duration = std::stod(val);
+                try { current_duration = std::stod(val); } catch (...) { current_duration = 0; }
             } else if (line.substr(0, 22) == "#EXT-X-MEDIA-SEQUENCE:") {
-                media_sequence_ = std::stoi(line.substr(22));
+                try { media_sequence_ = std::stoi(line.substr(22)); } catch (...) { media_sequence_ = 0; }
             } else if (line == "#EXT-X-ENDLIST") {
                 is_live_ = false;
             } else if (!line.empty() && line[0] != '#') {
@@ -633,18 +684,20 @@ void HlsManager::ReloadPlaylist() {
         for (auto& es : segments_) {
             if (es.url == ns.url) { found = true; break; }
         }
-        if (!found) segments_.push_back(ns);
         LeaveCriticalSection(&seg_lock_);
         if (found) continue;
 
-        duration_ += ns.duration;
-
-        // Download the new segment
+        // Download before adding to segments_ — don't record failures permanently
         std::vector<uint8_t> seg_data;
         if (!DownloadUrl(ns.url.c_str(), seg_data)) {
             LOG_WARN("HLS: Failed to download new segment from reload");
             continue;
         }
+
+        EnterCriticalSection(&seg_lock_);
+        segments_.push_back(ns);
+        LeaveCriticalSection(&seg_lock_);
+        duration_.store(duration_.load(std::memory_order_relaxed) + ns.duration, std::memory_order_release);
 
         byte_stream_->AddSegment(seg_data.data(), seg_data.size());
         added++;
@@ -652,6 +705,11 @@ void HlsManager::ReloadPlaylist() {
 
     if (added > 0) {
         LOG_INFO("HLS: Reload added %d new segments", added);
+        EnterCriticalSection(&seg_lock_);
+        int new_size = (int)segments_.size();
+        LeaveCriticalSection(&seg_lock_);
+        next_segment_to_download_.store(new_size, std::memory_order_release);
+        consumed_up_to_ = new_size;
     }
 }
 
@@ -669,7 +727,7 @@ void HlsManager::DownloadLoop() {
             if (!has_more) {
                 if (!is_live_) {
                     byte_stream_->SetEndOfStream();
-                    WaitForSingleObject(wake_event_, INFINITE);
+                    WaitForSingleObject(wake_event_, 1000);
                     continue;
                 }
                 // Live — reload playlist and wait for new segments

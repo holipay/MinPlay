@@ -4,6 +4,7 @@
 #include "../audio_out/audio_output.h"
 #include "../util/log.h"
 #include <cstdlib>
+#include <algorithm>
 
 SourceReaderCallback::SourceReaderCallback() {
     InitializeCriticalSection(&lock_);
@@ -40,7 +41,7 @@ STDMETHODIMP SourceReaderCallback::OnEvent(DWORD /*dwStreamIndex*/, IMFMediaEven
 HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESULT hrStatus, DWORD dwStreamIndex,
                                  DWORD dwStreamFlags, LONGLONG llTimestamp, IMFSample* pSample) {
     // If stopped, discard everything (no processing, no re-request)
-    if (!self->running_.load(std::memory_order_relaxed)) return S_OK;
+    if (!self->running_.load(std::memory_order_acquire)) return S_OK;
 
     if (FAILED(hrStatus) || (dwStreamFlags & MF_SOURCE_READERF_ERROR)) {
         LOG_WARN("OnReadSample failed stream=%lu hr=0x%08lX flags=0x%08lX",
@@ -60,6 +61,13 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
         else if (dwStreamIndex == self->audio_stream_)
             self->audio_eof_ = true;
         LOG_INFO("EOF stream=%lu", dwStreamIndex);
+        return S_OK;
+    }
+
+    if (dwStreamFlags & MF_SOURCE_READERF_STREAMTICK) {
+        // Gap in the stream — re-request to continue reading
+        if (self->running_.load(std::memory_order_acquire) && self->reader_)
+            self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
         return S_OK;
     }
 
@@ -97,7 +105,7 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
                 BYTE* data = nullptr;
                 DWORD max_len = 0, cur_len = 0;
                 buf->Lock(&data, &max_len, &cur_len);
-                self->ao_->Write(data, (int)cur_len);
+                self->ao_->Write(data, (int)(std::min)(cur_len, (DWORD)INT_MAX));
                 self->ao_->SetPts(llTimestamp / 10000000.0);
                 buf->Unlock();
             }

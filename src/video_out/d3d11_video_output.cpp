@@ -155,6 +155,10 @@ void D3D11VideoOutput::EnsureTextures(int w, int h, int is_nv12) {
         hr1 = device_->CreateTexture2D(&td, nullptr, &tex_uv_);
         if (SUCCEEDED(hr1))
             device_->CreateShaderResourceView(tex_uv_, nullptr, &srv_uv_);
+
+        if (tex_y_ && tex_uv_ && srv_y_ && srv_uv_) {
+            tex_w_ = w; tex_h_ = h; tex_is_nv12_ = is_nv12;
+        }
     } else {
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = w; td.Height = h;
@@ -171,10 +175,10 @@ void D3D11VideoOutput::EnsureTextures(int w, int h, int is_nv12) {
             HRESULT hr2 = device_->CreateShaderResourceView(tex_rgb_, nullptr, &srv_rgb_);
             if (FAILED(hr2)) LOG_WARN("CreateSRV RGB failed: 0x%08lX", hr2);
         }
+        if (tex_rgb_ && srv_rgb_) {
+            tex_w_ = w; tex_h_ = h; tex_is_nv12_ = is_nv12;
+        }
     }
-    tex_w_ = w;
-    tex_h_ = h;
-    tex_is_nv12_ = is_nv12;
 }
 
 void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride) {
@@ -287,7 +291,8 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int dat
 
     HRESULT hr = swap_->Present(0, 0);
     if (hr == DXGI_STATUS_OCCLUDED) {
-        Sleep(10);
+        // Window is occluded — skip render, don't sleep (blocks message loop)
+        return;
     } else if (FAILED(hr)) {
         LOG_WARN("Present failed: 0x%08lX", hr);
     }
@@ -296,14 +301,14 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int dat
 void D3D11VideoOutput::Resize(int w, int h) {
     if (!swap_) return;
     if (win_w_ == w && win_h_ == h) return;
-    win_w_ = w;
-    win_h_ = h;
 
     HRESULT hr = swap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
     if (FAILED(hr)) {
         LOG_WARN("ResizeBuffers failed: 0x%08lX", hr);
         return;
     }
+    win_w_ = w;
+    win_h_ = h;
 
     if (rtv_) { rtv_->Release(); rtv_ = nullptr; }
     ID3D11Texture2D* backbuf = nullptr;

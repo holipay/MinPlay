@@ -2,6 +2,7 @@
 #include "../util/log.h"
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
@@ -37,7 +38,7 @@ void WasapiAudioOutput::RingWrite(const uint8_t* data, int size) {
         data += chunk;
         size -= chunk;
     }
-    ring_head_.store(h, std::memory_order_relaxed);
+    ring_head_.store(h, std::memory_order_release);
 }
 
 float WasapiAudioOutput::ReadSample(const uint8_t* p, int bits) const {
@@ -82,7 +83,7 @@ void WasapiAudioOutput::FillBuffer(BYTE* out, int out_frames) {
         if (avail >= in_fb) {
             // Drain the last frame(s) without interpolation
             int consume = avail - (avail % in_fb);
-            ring_tail_.store((ring_tail_.load(std::memory_order_relaxed) + consume) % ring_size_, std::memory_order_relaxed);
+            ring_tail_.store((ring_tail_.load(std::memory_order_relaxed) + consume) % ring_size_, std::memory_order_release);
         }
         if (out_frames > 0)
             memset(out_f, 0, out_frames * out_ch * sizeof(float));
@@ -121,8 +122,9 @@ void WasapiAudioOutput::FillBuffer(BYTE* out, int out_frames) {
     }
 
     int consumed = (int)pos;
-    if (consumed > 0 && consumed < in_needed)
-        ring_tail_.store((ring_tail_.load(std::memory_order_relaxed) + consumed * in_fb) % ring_size_, std::memory_order_relaxed);
+    int to_advance = (consumed > 0) ? (std::min)(consumed, in_needed) : 0;
+    if (to_advance > 0)
+        ring_tail_.store((ring_tail_.load(std::memory_order_relaxed) + to_advance * in_fb) % ring_size_, std::memory_order_release);
     resample_frac_ = pos - consumed;
 
     if (written < out_frames)
@@ -319,7 +321,6 @@ void WasapiAudioOutput::Write(const uint8_t* data, int size) {
     if (to_write > 0) {
         RingWrite(data, to_write);
         total_bytes_written_.fetch_add(to_write, std::memory_order_relaxed);
-        last_write_size_ = to_write;
     }
 }
 
@@ -331,9 +332,10 @@ double WasapiAudioOutput::GetClock() {
             return (double)pos / out_rate_;
     }
     // Fallback: PTS estimate minus buffered duration (large buffers skew this)
-    if (last_write_pts_ > 0 && in_rate_ > 0 && in_frame_bytes_ > 0) {
+    double pts = last_write_pts_.load(std::memory_order_acquire);
+    if (pts > 0 && in_rate_ > 0 && in_frame_bytes_ > 0) {
         double buffered_sec = (double)RingAvail() / (double)(in_rate_ * in_frame_bytes_);
-        double clk = last_write_pts_ - buffered_sec;
+        double clk = pts - buffered_sec;
         return clk > 0 ? clk : 0;
     }
     return 0;
@@ -349,7 +351,8 @@ void WasapiAudioOutput::Reset() {
     playing_ = false;
     if (event_) SetEvent(event_);
     if (thread_) {
-        WaitForSingleObject(thread_, INFINITE);
+        if (WaitForSingleObject(thread_, 3000) == WAIT_TIMEOUT)
+            LOG_WARN("WASAPI Reset: playback thread did not exit within 3s");
         CloseHandle(thread_);
         thread_ = nullptr;
     }
@@ -358,8 +361,7 @@ void WasapiAudioOutput::Reset() {
     ring_tail_.store(0, std::memory_order_relaxed);
     resample_frac_ = 0;
     total_bytes_written_.store(0, std::memory_order_relaxed);
-    last_write_pts_ = 0;
-    last_write_size_ = 0;
+    last_write_pts_.store(0.0, std::memory_order_relaxed);
     speed_ = 1.0;
     if (client_) client_->Start();
     playing_ = true;

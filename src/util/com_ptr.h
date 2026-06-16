@@ -38,6 +38,7 @@ public:
 
     template<typename U>
     HRESULT As(ComPtr<U>& out) const {
+        if (!ptr_) return E_POINTER;
         return ptr_->QueryInterface(__uuidof(U), (void**)out.ReleaseAndGetAddress());
     }
 

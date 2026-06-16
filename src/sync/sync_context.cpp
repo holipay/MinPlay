@@ -29,6 +29,7 @@ SyncDecision SyncContext::Decide(double video_pts, double audio_clk) {
     } else if (diff < wait_limit_) {
         d.action = SyncAction::Wait;
         d.wait_ms = (int)(diff * 1000.0);
+        if (d.wait_ms < 1) d.wait_ms = 1;
     } else {
         d.action = SyncAction::Wait;
         d.wait_ms = (int)(wait_limit_ * 1000.0);

@@ -22,8 +22,8 @@ public:
 
     bool Open(const wchar_t* url);
     void Close();
-    bool IsLive() const { return is_live_; }
-    double Duration() const { return duration_; }
+    bool IsLive() const { return is_live_.load(std::memory_order_acquire); }
+    double Duration() const { return duration_.load(std::memory_order_acquire); }
 
     // Get the byte stream (creates on first call)
     class HlsByteStream* GetByteStream();
@@ -38,8 +38,8 @@ private:
     void ReloadPlaylist();
 
     std::vector<HlsSegment> segments_;
-    bool is_live_ = false;
-    double duration_ = 0;
+    std::atomic<bool> is_live_{false};
+    std::atomic<double> duration_{0.0};
     int target_duration_ = 10;
     int media_sequence_ = 0;
     std::wstring playlist_url_;
@@ -100,24 +100,26 @@ private:
         int64_t offset = 0;
     };
     std::vector<LoadedSeg> segs_;
-    int64_t total_bytes_ = 0;
+    std::atomic<int64_t> total_bytes_{0};
     bool end_of_stream_ = false;
     bool closed_ = false;
     bool has_eos_marker_ = false;
 
-    int64_t read_pos_ = 0;
+    std::atomic<int64_t> read_pos_{0};
     std::atomic<LONG> needs_wake_{0};
 
-    // Async read support (live streams: hold pending when no data)
-    BYTE* async_buf_ = nullptr;
-    ULONG async_size_ = 0;
-    IMFAsyncCallback* async_cb_ = nullptr;
-    IUnknown* async_state_ = nullptr;
     ULONG async_result_ = 0;
     HRESULT async_hr_ = S_OK;
-    bool async_pending_ = false;
-    void CompleteAsync(HRESULT hr, ULONG bytesRead);
-    // Assumes lock_ held; copies data from segs starting at read_pos_, advances read_pos_
+
+    struct PendingRead {
+        BYTE* buf = nullptr;
+        ULONG size = 0;
+        IMFAsyncCallback* cb = nullptr;
+        IUnknown* state = nullptr;
+    };
+    std::vector<PendingRead> pending_reads_;
+
     ULONG CopyFromSegmentsLocked(BYTE* pb, ULONG cb);
-    void CancelPendingRead();
+    void CancelPendingReadsLocked();
+    void FulfillPendingReads();
 };

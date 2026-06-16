@@ -44,8 +44,9 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
             reader.reset();
             if (OpenHls(url)) {
                 // Re-create source reader attributes
-                hr = MFCreateAttributes(&sattrs, callback ? 2 : 1);
+                hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
                 if (FAILED(hr)) return false;
+                sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
                 if (callback) {
                     sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
                 }
@@ -87,8 +88,10 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
             pix_fmt_ = f.pf;
 
             ComPtr<IMFMediaType> native;
-            reader->GetCurrentMediaType(
-                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &native);
+            if (FAILED(reader->GetCurrentMediaType(
+                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &native)) || !native) {
+                continue;
+            }
             UINT32 w = 0, h = 0, num = 0, den = 0;
             GetUint64Pair(native.get(), MF_MT_FRAME_SIZE, &w, &h);
             GetUint64Pair(native.get(), MF_MT_FRAME_RATE, &num, &den);

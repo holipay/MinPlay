@@ -16,7 +16,7 @@
 #define TIMER_VIDEO_DISPLAY 2
 #define TIMER_EOF_CHECK     3
 
-enum class PlayerState { Stopped, Playing, Paused };
+enum class PlayerState : int { Stopped, Playing, Paused };
 
 class Player {
 public:
@@ -40,13 +40,13 @@ public:
     void CheckAudio();
     void ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp);
 
-    PlayerState GetState() const { return state_; }
+    PlayerState GetState() const { return state_.load(std::memory_order_relaxed); }
     HWND GetHwnd() const { return hwnd_; }
     double GetDuration() const;
     double GetPosition() const;
     bool HasVideo() const { return has_video_; }
     bool HasAudio() const { return has_audio_; }
-    double GetVideoFps() const { return video_fps_; }
+    double GetVideoFps() const { return video_fps_.load(std::memory_order_relaxed); }
     bool IsFinished() const;
     void OnVideoFormatChanged();
 
@@ -61,7 +61,7 @@ private:
     static constexpr int VQ_SIZE = 32;
 
     HWND hwnd_ = nullptr;
-    PlayerState state_ = PlayerState::Stopped;
+    std::atomic<PlayerState> state_{PlayerState::Stopped};
 
     MediaSource* source_ = nullptr;
     SourceReaderCallback* callback_ = nullptr;
@@ -74,7 +74,7 @@ private:
     bool has_audio_ = false;
     bool is_network_ = false;
     int audio_bytes_per_sec_ = 0;
-    double video_fps_ = 30.0;
+    std::atomic<double> video_fps_{30.0};
 
     LARGE_INTEGER perf_freq_{};
     double start_time_ = 0;
@@ -85,17 +85,17 @@ private:
     VFrame vq_[VQ_SIZE];
     std::atomic<int> vq_head_{0};
     std::atomic<int> vq_tail_{0};
-    std::mutex vq_mutex_;
+    mutable std::mutex vq_mutex_;
 
     // Render frame buffer
-    std::mutex frame_mutex_;
+    mutable std::mutex frame_mutex_;
     uint8_t* frame_buf_ = nullptr;
     int frame_buf_size_ = 0;
     std::atomic<bool> frame_ready_{false};
-    int frame_w_ = 0;
-    int frame_h_ = 0;
+    std::atomic<int> frame_w_{0};
+    std::atomic<int> frame_h_{0};
     int frame_size_ = 0;
-    PixelFormat pix_fmt_ = PixelFormat::Unknown;
+    std::atomic<PixelFormat> pix_fmt_{PixelFormat::Unknown};
 
 
 
