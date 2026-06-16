@@ -40,7 +40,7 @@ target_include_directories(MinPlay PRIVATE src)
 if(MSVC)
     target_compile_options(MinPlay PRIVATE /W4 /utf-8 /EHsc)
     set_target_properties(MinPlay PROPERTIES
-        LINK_FLAGS "/SUBSYSTEM:CONSOLE"
+        WIN32_EXECUTABLE TRUE
     )
 endif()
 
