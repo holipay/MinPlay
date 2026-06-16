@@ -347,11 +347,11 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 
     if (vq_fmt == PixelFormat::YUY2 && fw > 0 && fh > 0) {
         converted = ConvertYUY2ToNV12(data, fw, fh);
-        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; frame_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX); }
+        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; fs = fw; frame_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX); }
         else { buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
     } else if (vq_fmt == PixelFormat::I420 && fw > 0 && fh > 0) {
         converted = ConvertI420ToNV12(data, fw, fh);
-        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; frame_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX); }
+        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; fs = fw; frame_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX); }
         else { buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
     }
 
@@ -524,11 +524,12 @@ void Player::OnVideoFormatChanged() {
         if (vi.width > 0) frame_w_ = vi.width;
         if (vi.height > 0) frame_h_ = vi.height;
         if (vi.fps > 0) video_fps_ = vi.fps;
+        stride_ = vi.stride;
         pix_fmt_ = fmt;
     }
-    LOG_INFO("Player video format updated: %dx%d @ %.1f fps",
+    LOG_INFO("Player video format updated: %dx%d stride=%d @ %.1f fps",
              frame_w_.load(std::memory_order_relaxed), frame_h_.load(std::memory_order_relaxed),
-             video_fps_.load(std::memory_order_relaxed));
+             stride_, video_fps_.load(std::memory_order_relaxed));
 }
 
 bool Player::RenderD3D(int w, int h) {
