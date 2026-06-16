@@ -15,7 +15,10 @@ struct WinHttpHandle {
     WinHttpHandle(const WinHttpHandle&) = delete;
     WinHttpHandle& operator=(const WinHttpHandle&) = delete;
     WinHttpHandle(WinHttpHandle&& o) noexcept : h(o.h) { o.h = nullptr; }
-    WinHttpHandle& operator=(WinHttpHandle&& o) noexcept { if (h) WinHttpCloseHandle(h); h = o.h; o.h = nullptr; return *this; }
+    WinHttpHandle& operator=(WinHttpHandle&& o) noexcept {
+        std::swap(h, o.h);
+        return *this;
+    }
     void reset(HINTERNET h_ = nullptr) { if (h) WinHttpCloseHandle(h); h = h_; }
     HINTERNET* operator&() { return &h; }
     operator HINTERNET() const { return h; }

@@ -13,6 +13,7 @@ void OSD::Draw(HDC hdc, int, int,
     int dur_min = (int)duration / 60;
     int dur_sec = (int)duration % 60;
 
+    if (fps < 0) fps = 0;
     snprintf(buf, sizeof(buf), "%02d:%02d / %02d:%02d  [%d fps]",
              pos_min, pos_sec, dur_min, dur_sec, fps);
 

@@ -33,7 +33,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_SIZE: {
             int nw = LOWORD(lp), nh = HIWORD(lp);
             if (g_player) g_player->Resize(nw, nh);
-            InvalidateRect(hwnd, nullptr, FALSE);
+            // D3D11 renders via WM_TIMER, not WM_PAINT — skip InvalidateRect
             break;
         }
 

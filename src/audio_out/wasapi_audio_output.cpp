@@ -52,8 +52,11 @@ float WasapiAudioOutput::ReadSample(const uint8_t* p, int bits) const {
         if (v & 0x800000) v |= (int32_t)0xFF000000;
         return v / 8388608.0f;
     }
-    case 32:
-        return *(const float*)p;
+    case 32: {
+        float v;
+        memcpy(&v, p, sizeof(v));
+        return v;
+    }
     default:
         return 0;
     }
@@ -140,12 +143,13 @@ DWORD WasapiAudioOutput::PlaybackThreadProc() {
         if (wr != WAIT_OBJECT_0) continue;
 
         UINT32 padding = 0;
-        client_->GetCurrentPadding(&padding);
+        HRESULT hr = client_->GetCurrentPadding(&padding);
+        if (FAILED(hr)) { playing_ = false; break; }
         UINT32 frames = buffer_frames_ - padding;
         if (frames == 0) continue;
 
         BYTE* buf = nullptr;
-        HRESULT hr = render_->GetBuffer(frames, &buf);
+        hr = render_->GetBuffer(frames, &buf);
         if (FAILED(hr) || !buf) continue;
 
         FillBuffer(buf, frames);
