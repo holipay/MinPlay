@@ -363,6 +363,8 @@ void WasapiAudioOutput::Reset() {
     total_bytes_written_.store(0, std::memory_order_relaxed);
     last_write_pts_.store(0.0, std::memory_order_relaxed);
     speed_ = 1.0;
+    // Brief pause before restart — some audio drivers need time to settle
+    Sleep(30);
     if (client_) client_->Start();
     playing_ = true;
     thread_ = CreateThread(nullptr, 0, PlaybackThread, this, 0, nullptr);

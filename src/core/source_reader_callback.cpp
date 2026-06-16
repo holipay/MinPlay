@@ -122,6 +122,11 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
             LONG vp = self->video_pending_.fetch_add(1, std::memory_order_relaxed) + 1;
             if (vp < 2)
                 self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
+        } else if (dwStreamIndex == self->video_stream_ && !pSample &&
+                   (dwStreamFlags & (MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED |
+                                     MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED))) {
+            // Type change without a sample — re-request to keep pipeline primed
+            self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
         }
     }
 

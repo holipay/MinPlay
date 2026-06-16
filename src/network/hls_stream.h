@@ -110,8 +110,8 @@ private:
     std::atomic<int64_t> read_pos_{0};
     std::atomic<LONG> needs_wake_{0};
 
-    ULONG async_result_ = 0;
-    HRESULT async_hr_ = S_OK;
+    std::atomic<ULONG> async_result_{0};
+    std::atomic<HRESULT> async_hr_{E_ABORT};
 
     struct PendingRead {
         BYTE* buf = nullptr;

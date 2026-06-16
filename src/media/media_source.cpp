@@ -107,8 +107,6 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     }
     vmt.reset();
 
-    reader->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
-
     ComPtr<IMFMediaType> amt;
     MFCreateMediaType(&amt);
     amt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);

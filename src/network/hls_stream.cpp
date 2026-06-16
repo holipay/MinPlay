@@ -212,8 +212,8 @@ STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCal
     bool is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
 
     if (bytesRead > 0 || is_eos) {
-        async_result_ = bytesRead;
-        async_hr_ = is_eos ? S_FALSE : S_OK;
+        async_result_.store(bytesRead, std::memory_order_release);
+        async_hr_.store(is_eos ? S_FALSE : S_OK, std::memory_order_release);
         LeaveCriticalSection(&lock_);
 
         pCallback->AddRef();
@@ -239,8 +239,8 @@ STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCal
 }
 
 STDMETHODIMP HlsByteStream::EndRead(IMFAsyncResult* /*pResult*/, ULONG* pcbRead) {
-    if (pcbRead) *pcbRead = async_result_;
-    return async_hr_;
+    if (pcbRead) *pcbRead = async_result_.load(std::memory_order_acquire);
+    return async_hr_.load(std::memory_order_acquire);
 }
 
 STDMETHODIMP HlsByteStream::Write(const BYTE*, ULONG, ULONG*) { return E_NOTIMPL; }
@@ -254,9 +254,11 @@ STDMETHODIMP HlsByteStream::Seek(MFBYTESTREAM_SEEK_ORIGIN SeekOrigin, LONGLONG l
     if (SeekOrigin == 0) {  // MFBYTESTREAM_SEEK_ORIGIN_Begin
         read_pos_ = llSeekOffset;
     } else {
-        read_pos_ = total_bytes_ + llSeekOffset;
+        read_pos_ = total_bytes_.load(std::memory_order_acquire) + llSeekOffset;
     }
     if (read_pos_ < 0) read_pos_ = 0;
+    int64_t tb = total_bytes_.load(std::memory_order_acquire);
+    if (read_pos_ > tb) read_pos_ = tb;
     if (pqwCurrentPosition) *pqwCurrentPosition = read_pos_;
     LeaveCriticalSection(&lock_);
     return S_OK;
@@ -315,8 +317,8 @@ void HlsByteStream::FulfillPendingReads() {
             continue;
         }
 
-        async_result_ = n;
-        async_hr_ = is_eos ? S_FALSE : S_OK;
+        async_result_.store(n, std::memory_order_release);
+        async_hr_.store(is_eos ? S_FALSE : S_OK, std::memory_order_release);
         LeaveCriticalSection(&lock_);
 
         ComPtr<IMFAsyncResult> result;
@@ -361,8 +363,8 @@ void HlsByteStream::SetEndOfStream() {
     to_fulfill.swap(pending_reads_);
 
     for (auto& pr : to_fulfill) {
-        async_result_ = 0;
-        async_hr_ = S_FALSE;
+        async_result_.store(0, std::memory_order_release);
+        async_hr_.store(S_FALSE, std::memory_order_release);
         LeaveCriticalSection(&lock_);
 
         ComPtr<IMFAsyncResult> result;
@@ -439,6 +441,11 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
     DWORD feature = WINHTTP_ENABLE_SSL_REVOCATION;
     WinHttpSetOption(hRequest, WINHTTP_OPTION_ENABLE_FEATURE,
                      &feature, sizeof(feature));
+
+    // Follow HTTP redirects (301/302)
+    DWORD redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_REDIRECT_POLICY,
+                     &redirect_policy, sizeof(redirect_policy));
 
     // Set timeout
     WinHttpSetTimeouts(hRequest, 5000, 5000, 10000, 10000);
