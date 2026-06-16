@@ -40,7 +40,6 @@ public:
 
     bool Open(HWND hwnd, const wchar_t* url);
     void Close();
-    void Destroy();
 
     void Play();
     void PauseToggle();
@@ -66,6 +65,7 @@ private:
     struct VFrame {
         uint8_t* data = nullptr;
         int size = 0;
+        int stride = 0;
         double timestamp = 0;
         PixelFormat pix_fmt = PixelFormat::Unknown;
     };
@@ -107,6 +107,7 @@ private:
     std::atomic<bool> frame_ready_{false};
     std::atomic<int> frame_w_{0};
     std::atomic<int> frame_h_{0};
+    int stride_ = 0;
     int frame_size_ = 0;
     std::atomic<PixelFormat> pix_fmt_{PixelFormat::Unknown};
 

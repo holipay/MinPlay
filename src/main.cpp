@@ -205,7 +205,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     KillTimer(g_hwnd, TIMER_AUDIO_CHECK);
     KillTimer(g_hwnd, TIMER_VIDEO_DISPLAY);
     KillTimer(g_hwnd, TIMER_EOF_CHECK);
-    g_player->Close();
     delete g_player;
 
     MFShutdown();

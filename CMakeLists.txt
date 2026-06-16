@@ -22,7 +22,6 @@ target_link_libraries(MinPlay PRIVATE
     ole32
     oleaut32
     shell32
-    winmm
     mf
     mfplat
     mfreadwrite

@@ -27,6 +27,14 @@ struct WinHttpHandle {
 
 #pragma comment(lib, "winhttp.lib")
 
+static std::wstring Utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), nullptr, 0);
+    std::wstring w(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), &w[0], len);
+    return w;
+}
+
 // ========================================================================
 // HlsByteStream
 // ========================================================================
@@ -568,7 +576,7 @@ bool HlsManager::ParseMasterPlaylist(const std::string& content, const std::wstr
     if (best_url_str.empty()) return false;
 
     std::wstring variant_url = ResolveUrl(base_url,
-        std::wstring(best_url_str.begin(), best_url_str.end()));
+        Utf8ToWide(best_url_str));
 
     std::vector<uint8_t> data;
     if (!DownloadUrl(variant_url.c_str(), data)) {
@@ -610,7 +618,7 @@ bool HlsManager::ParseMediaPlaylist(const std::string& content, const std::wstri
         } else if (!line.empty() && line[0] != '#') {
             HlsSegment seg;
             seg.url = ResolveUrl(base_url,
-                std::wstring(line.begin(), line.end()));
+                Utf8ToWide(line));
             seg.duration = current_duration > 0 ? current_duration : (double)target_duration_;
             seg.byte_offset = 0;
             seg.byte_size = -1;
@@ -732,7 +740,7 @@ void HlsManager::ReloadPlaylist() {
                 is_live_ = false;
             } else if (!line.empty() && line[0] != '#') {
                 HlsSegment seg;
-                seg.url = ResolveUrl(base_url_, std::wstring(line.begin(), line.end()));
+                seg.url = ResolveUrl(base_url_, Utf8ToWide(line));
                 seg.duration = current_duration > 0 ? current_duration : (double)target_duration_;
                 parsed.push_back(seg);
                 current_duration = 0;

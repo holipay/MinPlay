@@ -359,8 +359,10 @@ void WasapiAudioOutput::Reset() {
     playing_ = false;
     if (event_) SetEvent(event_);
     if (thread_) {
-        if (WaitForSingleObject(thread_, 3000) == WAIT_TIMEOUT)
-            LOG_WARN("WASAPI Reset: playback thread did not exit within 3s");
+        if (WaitForSingleObject(thread_, 3000) == WAIT_TIMEOUT) {
+            LOG_WARN("WASAPI Reset: playback thread did not exit within 3s, terminating");
+            TerminateThread(thread_, 0);
+        }
         CloseHandle(thread_);
         thread_ = nullptr;
     }

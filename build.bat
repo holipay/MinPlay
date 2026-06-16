@@ -1,6 +1,13 @@
 @echo off
 setlocal enabledelayedexpansion
 
+rem Usage: build.bat [release]
+rem   (no arg)  -- debug build  (/Od /Zi)
+rem   release   -- release build (/O2)
+
+set OPTFLAGS=/Od /Zi
+if /i "%1"=="release" set OPTFLAGS=/O2
+
 rem Try vswhere first (VS 2017+), fall back to default path
 set VS_PATH=
 for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath 2^>nul`) do set VS_PATH=%%i
@@ -15,7 +22,8 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 cd /d "%~dp0"
-cl /Od /Zi /W4 /utf-8 /EHsc ^
+echo Build config: %OPTFLAGS%
+cl %OPTFLAGS% /W4 /utf-8 /EHsc ^
     src\main.cpp src\core\player.cpp src\core\source_reader_callback.cpp ^
     src\media\media_source.cpp ^
     src\network\hls_stream.cpp ^

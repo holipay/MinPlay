@@ -20,7 +20,7 @@ Player::Player() {
 }
 
 Player::~Player() {
-    Destroy();
+    Close();
 }
 
 double Player::GetTimeSec(const LARGE_INTEGER& freq) {
@@ -68,6 +68,7 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
         VideoInfo vi = source_->GetVideoInfo();
         frame_w_ = vi.width;
         frame_h_ = vi.height;
+        stride_ = vi.stride;
         video_fps_ = vi.fps;
     }
 
@@ -154,10 +155,6 @@ void Player::Close() {
     frame_buf_ = nullptr;
 }
 
-void Player::Destroy() {
-    Close();
-}
-
 void Player::Play() {
     if (!source_) return;
     state_.store(PlayerState::Playing, std::memory_order_release);
@@ -241,9 +238,11 @@ void Player::Resize(int w, int h) {
     win_h_ = h;
 }
 
-void Player::Paint(HDC /*hdc*/, int /*w*/, int /*h*/) {
-    // D3D11 renders via the video timer, not GDI.  Force a redraw so the
-    // window is refreshed after being uncovered (e.g. alt+tab back).
+void Player::Paint(HDC hdc, int w, int h) {
+    if (osd_) {
+        osd_->Draw(hdc, w, h, GetPosition(), GetDuration(),
+                   (int)video_fps_.load(std::memory_order_relaxed));
+    }
     PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
 }
 
@@ -336,12 +335,13 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     uint8_t* converted = nullptr;
 
     // Read frame dimensions + format under vq_mutex_ (same lock as VideoTick)
-    int fw, fh;
+    int fw, fh, fs;
     PixelFormat vq_fmt;
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
         fw = frame_w_;
         fh = frame_h_;
+        fs = stride_;
         vq_fmt = pix_fmt_;
     }
 
@@ -382,6 +382,7 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         }
         memcpy(f->data, frame_data, frame_size);
         f->size = frame_size;
+        f->stride = fs;
         f->timestamp = timestamp / 10000000.0;
         f->pix_fmt = vq_fmt;
         vq_tail_ = next_tail;
@@ -494,6 +495,7 @@ void Player::VideoTick() {
                     memcpy(frame_buf_, f->data, f->size);
                     frame_ready_ = true;
                     frame_size_ = f->size;
+                    stride_ = f->stride;
                     if (f->pix_fmt != PixelFormat::Unknown)
                         pix_fmt_ = f->pix_fmt;
                 }
@@ -534,7 +536,8 @@ bool Player::RenderD3D(int w, int h) {
     std::lock_guard<std::mutex> lock(frame_mutex_);
     if (frame_ready_ && frame_buf_ && frame_w_ > 0 && frame_h_ > 0) {
         vo_->Resize(w, h);
-        vo_->Render(frame_buf_, frame_w_, frame_h_, frame_size_, pix_fmt_);
+        int stride = stride_ > 0 ? stride_ : (int)frame_w_;
+        vo_->Render(frame_buf_, frame_w_, frame_h_, stride, pix_fmt_);
         frame_ready_ = false;
         return true;
     }

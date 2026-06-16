@@ -222,16 +222,13 @@ void D3D11VideoOutput::UploadRGB32(const uint8_t* data, int w, int h) {
     ctx_->Unmap(tex_rgb_, 0);
 }
 
-void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int data_size, PixelFormat fmt) {
+void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int stride, PixelFormat fmt) {
     if (!swap_ || !device_ || !data || src_w <= 0 || src_h <= 0) return;
     if (!rtv_) return;
     if (IsIconic(hwnd_)) return;
 
     int is_nv12 = (fmt == PixelFormat::NV12) ? 1 : 0;
-    int src_stride = src_w;
-    if (is_nv12 && data_size > 0 && src_h > 0) {
-        src_stride = (int)((LONGLONG)data_size * 2 / (3 * src_h));
-    }
+    int src_stride = (stride > 0) ? stride : src_w;
 
     EnsureTextures(src_w, src_h, is_nv12);
 
@@ -249,8 +246,8 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int dat
     ctx_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     ctx_->IASetInputLayout(layout_);
 
-    UINT stride = sizeof(D3D11Vertex), offset = 0;
-    ctx_->IASetVertexBuffers(0, 1, &vbuf_, &stride, &offset);
+    UINT vb_stride = sizeof(D3D11Vertex), vb_offset = 0;
+    ctx_->IASetVertexBuffers(0, 1, &vbuf_, &vb_stride, &vb_offset);
     ctx_->VSSetShader(vs_, nullptr, 0);
     ctx_->PSSetSamplers(0, 1, &sam_);
 

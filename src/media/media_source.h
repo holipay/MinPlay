@@ -12,6 +12,7 @@ class HlsManager;
 struct VideoInfo {
     int width = 0;
     int height = 0;
+    int stride = 0;   // bytes per row (0 = tight-packed, computed from width)
     double fps = 30.0;
 };
 

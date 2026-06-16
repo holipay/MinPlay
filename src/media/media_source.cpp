@@ -101,7 +101,10 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
             vi_.width = (int)w;
             vi_.height = (int)h;
             vi_.fps = den ? (double)num / den : 30.0;
-            LOG_INFO("Video: %dx%d @ %.1f fps (fmt=%d)", w, h, vi_.fps, (int)pix_fmt_);
+            vi_.stride = (int)MFGetAttributeUINT32(
+                native.get(), MF_MT_DEFAULT_STRIDE, 0);
+            LOG_INFO("Video: %dx%d stride=%d @ %.1f fps (fmt=%d)",
+                     w, h, vi_.stride, vi_.fps, (int)pix_fmt_);
             break;
         }
     }
@@ -111,20 +114,46 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     MFCreateMediaType(&amt);
     amt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     amt->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    amt->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
-    amt->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
-    amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
 
-    hr = reader->SetCurrentMediaType(
-        (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, amt.get());
-    amt.reset();
-    if (SUCCEEDED(hr)) {
-        has_audio_ = true;
-        ai_.sample_rate = 44100;
-        ai_.channels = 2;
-        ai_.bits_per_sample = 16;
-        LOG_INFO("Audio: 44100 Hz, 2 ch, 16 bit");
+    // Try native audio format first; fall back to 44100/2ch/16bit PCM
+    {
+        ComPtr<IMFMediaType> native;
+        if (SUCCEEDED(reader->GetNativeMediaType(
+                (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &native))) {
+            UINT32 sr = 0, ch = 0, bps = 0;
+            native->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &sr);
+            native->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &ch);
+            native->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bps);
+            amt->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sr);
+            amt->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, ch);
+            amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, bps);
+            hr = reader->SetCurrentMediaType(
+                (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, amt.get());
+            if (SUCCEEDED(hr)) {
+                has_audio_ = true;
+                ai_.sample_rate = sr;
+                ai_.channels = ch;
+                ai_.bits_per_sample = bps;
+                LOG_INFO("Audio: %u Hz, %u ch, %u bit (native)", sr, ch, bps);
+            }
+        }
     }
+
+    if (!has_audio_) {
+        amt->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100);
+        amt->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+        amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+        hr = reader->SetCurrentMediaType(
+            (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, amt.get());
+        if (SUCCEEDED(hr)) {
+            has_audio_ = true;
+            ai_.sample_rate = 44100;
+            ai_.channels = 2;
+            ai_.bits_per_sample = 16;
+            LOG_INFO("Audio: 44100 Hz, 2 ch, 16 bit (fallback)");
+        }
+    }
+    amt.reset();
 
     PROPVARIANT dur;
     PropVariantInit(&dur);
