@@ -186,8 +186,13 @@ HRESULT SourceReaderCallback::Stop() {
     running_.store(false, std::memory_order_release);
     LeaveCriticalSection(&lock_);
     // Wait for any in-flight OnReadSample to finish before caller deletes objects
-    while (busy_.load(std::memory_order_acquire) > 0)
+    int spin = 0;
+    while (busy_.load(std::memory_order_acquire) > 0 && spin < 10000) {
         SwitchToThread();
+        spin++;
+    }
+    if (busy_.load(std::memory_order_acquire) > 0)
+        LOG_WARN("Stop: OnReadSample still busy after 10000 spin-wait iterations");
     return S_OK;
 }
 

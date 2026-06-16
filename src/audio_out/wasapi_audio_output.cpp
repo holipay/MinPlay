@@ -138,7 +138,7 @@ DWORD WasapiAudioOutput::PlaybackThreadProc() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     while (playing_) {
-        DWORD wr = WaitForSingleObject(event_, 1000);
+        DWORD wr = WaitForSingleObject(event_, 200);
         if (!playing_) break;
         if (wr != WAIT_OBJECT_0) continue;
 
@@ -200,21 +200,6 @@ bool WasapiAudioOutput::Initialize(int sample_rate, int channels, int bits) {
     hr = client_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
         (REFERENCE_TIME)200000, (REFERENCE_TIME)0, mix, nullptr);
-    if (FAILED(hr)) {
-        LOG_WARN("Exclusive with mix format failed: 0x%08lX, trying PCM16", hr);
-        WAVEFORMATEX pcm16 = {0};
-        pcm16.wFormatTag = WAVE_FORMAT_PCM;
-        pcm16.nChannels = mix->nChannels;
-        pcm16.nSamplesPerSec = mix->nSamplesPerSec;
-        pcm16.wBitsPerSample = 16;
-        pcm16.nBlockAlign = pcm16.nChannels * pcm16.wBitsPerSample / 8;
-        pcm16.nAvgBytesPerSec = pcm16.nSamplesPerSec * pcm16.nBlockAlign;
-        pcm16.cbSize = 0;
-        hr = client_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,
-            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-            (REFERENCE_TIME)200000, (REFERENCE_TIME)0, &pcm16, nullptr);
-    }
-
     if (SUCCEEDED(hr)) {
         exclusive_ = true;
         WAVEFORMATEX* actual = nullptr;
@@ -303,6 +288,12 @@ bool WasapiAudioOutput::Initialize(int sample_rate, int channels, int bits) {
 
     playing_ = true;
     thread_ = CreateThread(nullptr, 0, PlaybackThread, this, 0, nullptr);
+    if (!thread_) {
+        LOG_ERROR("CreateThread for WASAPI playback failed");
+        playing_ = false;
+        client_->Stop();
+        return false;
+    }
 
     LOG_INFO("WASAPI: %d Hz -> %d Hz, %d ch -> %d ch, in %d bit, out %d bit",
              sample_rate, out_rate_, channels, out_channels_, bits, out_bits_);
@@ -373,9 +364,11 @@ void WasapiAudioOutput::Reset() {
     total_bytes_written_.store(0, std::memory_order_relaxed);
     last_write_pts_.store(0.0, std::memory_order_relaxed);
     speed_ = 1.0;
-    // Brief pause before restart — some audio drivers need time to settle
-    Sleep(30);
     if (client_) client_->Start();
     playing_ = true;
     thread_ = CreateThread(nullptr, 0, PlaybackThread, this, 0, nullptr);
+    if (!thread_) {
+        LOG_ERROR("CreateThread for WASAPI playback failed during Reset");
+        playing_ = false;
+    }
 }

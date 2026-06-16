@@ -549,7 +549,7 @@ void Player::OnVideoFormatChanged() {
     }
     LOG_INFO("Player video format updated: %dx%d stride=%d @ %.1f fps",
              frame_w_.load(std::memory_order_relaxed), frame_h_.load(std::memory_order_relaxed),
-             stride_, video_fps_.load(std::memory_order_relaxed));
+             stride_.load(std::memory_order_relaxed), video_fps_.load(std::memory_order_relaxed));
 }
 
 bool Player::RenderD3D(int w, int h) {
@@ -557,7 +557,8 @@ bool Player::RenderD3D(int w, int h) {
     std::lock_guard<std::mutex> lock(frame_mutex_);
     if (frame_ready_ && frame_buf_ && frame_w_ > 0 && frame_h_ > 0) {
         vo_->Resize(w, h);
-        int stride = stride_ > 0 ? stride_ : (int)frame_w_;
+        int stride = stride_.load(std::memory_order_relaxed);
+        if (stride <= 0) stride = (int)frame_w_;
         vo_->Render(frame_buf_, frame_w_, frame_h_, stride, pix_fmt_);
         frame_ready_ = false;
         return true;

@@ -185,6 +185,7 @@ void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride)
     D3D11_MAPPED_SUBRESOURCE map;
     HRESULT hr;
 
+    if (!tex_y_) { LOG_WARN("UploadNV12: tex_y_ is null"); return; }
     hr = ctx_->Map(tex_y_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
     if (FAILED(hr)) { LOG_WARN("Map tex_y_ failed: 0x%08lX", hr); return; }
     if (map.RowPitch == (UINT)stride) {
@@ -195,6 +196,7 @@ void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride)
     }
     ctx_->Unmap(tex_y_, 0);
 
+    if (!tex_uv_) { LOG_WARN("UploadNV12: tex_uv_ is null"); return; }
     hr = ctx_->Map(tex_uv_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
     if (FAILED(hr)) { LOG_WARN("Map tex_uv_ failed: 0x%08lX", hr); return; }
     const uint8_t* uv = data + stride * h;

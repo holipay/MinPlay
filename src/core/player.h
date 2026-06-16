@@ -111,7 +111,7 @@ private:
     std::atomic<bool> frame_ready_{false};
     std::atomic<int> frame_w_{0};
     std::atomic<int> frame_h_{0};
-    int stride_ = 0;
+    std::atomic<int> stride_{0};
     int frame_size_ = 0;
     std::atomic<PixelFormat> pix_fmt_{PixelFormat::Unknown};
 

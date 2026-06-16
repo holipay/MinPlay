@@ -475,11 +475,14 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
 
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
         WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+        LOG_ERROR("WinHttpSendRequest failed: %u", GetLastError());
         return false;
     }
 
-    if (!WinHttpReceiveResponse(hRequest, nullptr))
+    if (!WinHttpReceiveResponse(hRequest, nullptr)) {
+        LOG_ERROR("WinHttpReceiveResponse failed: %u", GetLastError());
         return false;
+    }
 
     DWORD status_code = 0;
     DWORD status_size = sizeof(status_code);
@@ -520,8 +523,14 @@ std::wstring HlsManager::ResolveUrl(const std::wstring& base, const std::wstring
         return clean + relative;
     }
 
-    // Base directory
-    size_t slash = clean.rfind(L'/');
+    // Base directory — skip the "://" prefix when looking for trailing slash
+    size_t proto = clean.find(L"://");
+    size_t slash = (proto != std::wstring::npos)
+        ? clean.rfind(L'/', clean.length())
+        : clean.rfind(L'/');
+    // Only use rfind result if it's past the protocol separator
+    if (slash != std::wstring::npos && proto != std::wstring::npos && slash <= proto + 2)
+        slash = std::wstring::npos;
     std::wstring result = (slash != std::wstring::npos)
         ? clean.substr(0, slash + 1) + relative
         : clean + L"/" + relative;
@@ -615,7 +624,7 @@ bool HlsManager::ParseMediaPlaylist(const std::string& content, const std::wstri
                 val = val.substr(0, comma);
             try { current_duration = std::stod(val); } catch (...) { current_duration = 0; }
         } else if (line.substr(0, 22) == "#EXT-X-TARGETDURATION:") {
-            try { target_duration_ = std::stoi(line.substr(22)); } catch (...) { target_duration_ = 0; }
+            try { target_duration_ = (std::max)(1, std::stoi(line.substr(22))); } catch (...) { target_duration_ = 1; }
         } else if (line.substr(0, 22) == "#EXT-X-MEDIA-SEQUENCE:") {
             try { media_sequence_ = std::stoi(line.substr(22)); } catch (...) { media_sequence_ = 0; }
         } else if (line == "#EXT-X-ENDLIST") {
