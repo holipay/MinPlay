@@ -43,3 +43,9 @@ Makefile
 
 debug2.txt
 debug_log.txt
+test_stderr.txt
+test_stdout.txt
+
+# Test artifacts
+MinPlayTests.exe
+.mimocode/

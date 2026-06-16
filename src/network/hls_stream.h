@@ -29,6 +29,8 @@ public:
     class HlsByteStream* GetByteStream();
 
 private:
+    friend struct HlsManagerTest;
+
     bool ParseMasterPlaylist(const std::string& content, const std::wstring& base_url);
     bool ParseMediaPlaylist(const std::string& content, const std::wstring& base_url);
     bool DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out);

@@ -450,10 +450,12 @@ std::wstring HlsManager::ResolveUrl(const std::wstring& base, const std::wstring
     for (;;) {
         size_t dotdot = result.find(L"/../");
         if (dotdot == std::wstring::npos) break;
-        if (dotdot == 0) { result.erase(0, 4); continue; }
         size_t prev = result.rfind(L'/', dotdot - 1);
-        if (prev == std::wstring::npos) prev = 0;
-        result.erase(prev, dotdot - prev + 4);
+        if (prev == std::wstring::npos || prev == 0) {
+            result.erase(0, dotdot + 4);
+        } else {
+            result.erase(prev + 1, dotdot - prev + 3);
+        }
     }
     if (result.size() >= 3 && result.substr(result.size() - 3) == L"/..") {
         size_t prev = result.rfind(L'/', result.size() - 4);
