@@ -32,7 +32,6 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
     hwnd_ = hwnd;
 
     callback_ = new SourceReaderCallback();
-    if (!callback_) return false;
 
     source_ = new MediaSource();
     if (!source_->Open(url, static_cast<IMFSourceReaderCallback*>(callback_))) {
@@ -219,6 +218,9 @@ bool Player::IsFinished() const {
 }
 
 uint8_t* Player::ConvertYUY2ToNV12(const uint8_t* yuy2, int w, int h) {
+    // YUY2: 2 pixels per 4 bytes. Clamp to even width to avoid OOB on odd widths.
+    w &= ~1;
+    if (w < 2) return nullptr;
     int y_size = w * h;
     int nv12_size = y_size + y_size / 2;
     uint8_t* nv12 = (uint8_t*)malloc(nv12_size);
@@ -262,14 +264,26 @@ uint8_t* Player::ConvertI420ToNV12(const uint8_t* i420, int w, int h) {
 }
 
 void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
-    if (!sample || state_ != PlayerState::Playing) return;
+    // video_pending_ was already incremented in OnReadSampleImpl.
+    // Every early return before enqueue must ConsumeVideo() to balance it.
+    if (!sample) return;
+    if (state_ != PlayerState::Playing) {
+        if (callback_) callback_->ConsumeVideo();
+        return;
+    }
 
     ComPtr<IMFMediaBuffer> buf;
-    if (FAILED(sample->ConvertToContiguousBuffer(&buf))) return;
+    if (FAILED(sample->ConvertToContiguousBuffer(&buf))) {
+        if (callback_) callback_->ConsumeVideo();
+        return;
+    }
 
     BYTE* data = nullptr;
     DWORD max_len = 0, cur_len = 0;
-    if (FAILED(buf->Lock(&data, &max_len, &cur_len))) return;
+    if (FAILED(buf->Lock(&data, &max_len, &cur_len))) {
+        if (callback_) callback_->ConsumeVideo();
+        return;
+    }
 
     const uint8_t* frame_data = data;
     int frame_size = (int)cur_len;
