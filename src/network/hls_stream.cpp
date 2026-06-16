@@ -175,17 +175,32 @@ STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
 STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCallback, IUnknown* pState) {
     if (closed_) return E_ABORT;
     if (!pb || !pCallback) return E_POINTER;
-    pCallback->AddRef();
-    if (pState) pState->AddRef();
 
     EnterCriticalSection(&lock_);
     if (async_pending_) CancelPendingRead();
     ULONG bytesRead = CopyFromSegmentsLocked(pb, cb);
+
+    // For live streams: if no data and not EOS, defer completion via E_PENDING.
+    // MF will hold the request; AddSegment later fulfills it via CompleteAsync.
+    if (bytesRead == 0 && !(has_eos_marker_ && read_pos_ >= total_bytes_)) {
+        async_buf_ = pb;
+        async_size_ = cb;
+        async_pending_ = true;
+        async_cb_ = pCallback;
+        pCallback->AddRef();
+        async_state_ = pState;
+        if (pState) pState->AddRef();
+        LeaveCriticalSection(&lock_);
+        return E_PENDING;
+    }
+
     async_result_ = bytesRead;
     bool is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
-    async_hr_ = is_eos ? S_FALSE : (bytesRead > 0 ? S_OK : S_OK);
+    async_hr_ = is_eos ? S_FALSE : S_OK;
     LeaveCriticalSection(&lock_);
 
+    pCallback->AddRef();
+    if (pState) pState->AddRef();
     ComPtr<IMFAsyncResult> result;
     HRESULT hr = MFCreateAsyncResult(nullptr, pCallback, pState, &result);
     pCallback->Release();
@@ -249,6 +264,14 @@ void HlsByteStream::AddSegment(const uint8_t* data, size_t size) {
     total_bytes_ += size;
 
     needs_wake_.store(1, std::memory_order_release);
+
+    // Fulfill any pending async read with the new data
+    if (async_pending_) {
+        ULONG n = CopyFromSegmentsLocked(async_buf_, async_size_);
+        CompleteAsync(S_OK, n);
+        return;  // lock released by CompleteAsync
+    }
+
     LeaveCriticalSection(&lock_);
 }
 
