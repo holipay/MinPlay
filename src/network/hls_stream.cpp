@@ -127,6 +127,8 @@ void HlsByteStream::CancelPendingReadsLocked() {
         ComPtr<IMFAsyncResult> result;
         if (SUCCEEDED(MFCreateAsyncResult(nullptr, pr.cb, pr.state, &result))) {
             MFInvokeCallback(result.get());
+        } else {
+            LOG_ERROR("MFCreateAsyncResult failed in CancelPendingReadsLocked");
         }
         pr.cb->Release();
         if (pr.state) pr.state->Release();
@@ -178,8 +180,8 @@ ULONG HlsByteStream::CopyFromSegmentsLocked(BYTE* pb, ULONG cb) {
             pb += to_copy;
             read_pos_ += to_copy;
             // Free fully consumed segment data to prevent unbounded growth in live streams.
-            // The segment struct remains in segs_ for offset tracking (binary search).
-            if (offset_in_seg + (int64_t)to_copy >= (int64_t)seg.size) {
+            // For VOD (cache_data_=true) we keep data so seek-back can re-read it.
+            if (!cache_data_ && offset_in_seg + (int64_t)to_copy >= (int64_t)seg.size) {
                 free(seg.data);
                 seg.data = nullptr;
             }
@@ -271,7 +273,7 @@ STDMETHODIMP HlsByteStream::Seek(MFBYTESTREAM_SEEK_ORIGIN SeekOrigin, LONGLONG l
     if (SeekOrigin == 0) {  // MFBYTESTREAM_SEEK_ORIGIN_Begin
         read_pos_ = llSeekOffset;
     } else {
-        read_pos_ = total_bytes_.load(std::memory_order_acquire) + llSeekOffset;
+        read_pos_ = read_pos_ + llSeekOffset;
     }
     if (read_pos_ < 0) read_pos_ = 0;
     int64_t tb = total_bytes_.load(std::memory_order_acquire);
@@ -341,6 +343,8 @@ void HlsByteStream::FulfillPendingReads() {
         ComPtr<IMFAsyncResult> result;
         if (SUCCEEDED(MFCreateAsyncResult(nullptr, pr.cb, pr.state, &result))) {
             MFInvokeCallback(result.get());
+        } else {
+            LOG_ERROR("MFCreateAsyncResult failed in FulfillPendingReads");
         }
         pr.cb->Release();
         if (pr.state) pr.state->Release();
@@ -387,6 +391,8 @@ void HlsByteStream::SetEndOfStream() {
         ComPtr<IMFAsyncResult> result;
         if (SUCCEEDED(MFCreateAsyncResult(nullptr, pr.cb, pr.state, &result))) {
             MFInvokeCallback(result.get());
+        } else {
+            LOG_ERROR("MFCreateAsyncResult failed in SetEndOfStream");
         }
         pr.cb->Release();
         if (pr.state) pr.state->Release();
@@ -488,9 +494,11 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
     out.clear();
     uint8_t buf[65536];
     DWORD bytes_read = 0;
-    while (WinHttpReadData(hRequest, buf, sizeof(buf), &bytes_read) && bytes_read > 0)
+    while (download_running_ &&
+           WinHttpReadData(hRequest, buf, sizeof(buf), &bytes_read) && bytes_read > 0)
         out.insert(out.end(), buf, buf + bytes_read);
 
+    if (!download_running_) return false;
     return true;
 }
 
@@ -684,6 +692,7 @@ bool HlsManager::Open(const wchar_t* url) {
         LOG_CRITICAL("Out of memory: HlsByteStream");
         return false;
     }
+    byte_stream_->SetCacheData(!is_live_);  // VOD: keep data for seek-back
 
     // Pre-buffer first 3 segments
     int prebuffer = (std::min)(3, (int)segments_.size());
@@ -707,6 +716,11 @@ bool HlsManager::Open(const wchar_t* url) {
             ((HlsManager*)arg)->DownloadLoop();
             return 0;
         }, this, 0, nullptr);
+    if (!download_thread_) {
+        LOG_CRITICAL("Failed to create download thread");
+        download_running_ = false;
+        return false;
+    }
 
     return true;
 }
@@ -859,12 +873,14 @@ void HlsManager::Close() {
     download_running_ = false;
     SetEvent(wake_event_);
     if (download_thread_) {
-        WaitForSingleObject(download_thread_, 15000);
+        // INFINITE wait: download loop checks download_running_ between operations.
+        // WinHTTP built-in timeouts (up to ~30s worst case) bound the max wait.
+        WaitForSingleObject(download_thread_, INFINITE);
         CloseHandle(download_thread_);
         download_thread_ = nullptr;
     }
     if (byte_stream_) {
-        byte_stream_->Clear();
+        byte_stream_->Close();
         byte_stream_->Release();
         byte_stream_ = nullptr;
     }

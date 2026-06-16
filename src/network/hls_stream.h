@@ -90,6 +90,7 @@ public:
     void AddSegment(const uint8_t* data, size_t size);
     void SetEndOfStream();
     void Clear();
+    void SetCacheData(bool cache) { cache_data_ = cache; }
     bool CheckAndClearNeedsWake();
     bool HasUnreadData() const;
 
@@ -112,6 +113,7 @@ private:
     std::atomic<LONG> needs_wake_{0};
     std::atomic<ULONG> async_result_{0};
     std::atomic<HRESULT> async_hr_{E_ABORT};
+    bool cache_data_ = true;
 
     struct PendingRead {
         BYTE* buf = nullptr;
