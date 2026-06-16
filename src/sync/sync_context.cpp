@@ -2,6 +2,14 @@
 #include <cmath>
 #include <cstdlib>
 
+/*
+ * Sync window regions (diff = video_pts - audio_clk in seconds):
+ *   diff < -drop_threshold_  → frame is too late, DROP
+ *   diff < -sync_window_     → slightly late, render immediately (catch-up)
+ *   |diff| ≤ sync_window_    → within tolerance, render immediately
+ *   diff < wait_limit_       → ahead, WAIT for audio to catch up
+ *   diff ≥ wait_limit_       → far ahead, WAIT clamped to wait_limit_
+ */
 SyncContext::SyncContext(double sync_window_sec)
     : sync_window_(sync_window_sec)
     , drop_threshold_(sync_window_sec * 5)

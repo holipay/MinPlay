@@ -79,6 +79,28 @@ Video rendering is optimized:
 - `VideoTick` early-exits when no frames in queue
 - Network streams target 15 buffered frames vs 1 for local (VQ_SIZE=32)
 
+## Security
+
+### Input validation
+- Protocol whitelist in `main.cpp:IsSchemeAllowed()` — only `http://`, `https://`, and local files accepted. `rtsp://`, `file://`, etc. rejected at startup.
+- URL length bounded by `wcsncpy_s(url, 2048, ...)`. Embedded nulls prevented by `wcsnlen_s`.
+
+### WinHTTP security
+- TLS restricted to 1.2 and 1.3 (`WINHTTP_OPTION_SECURE_PROTOCOLS`) — no SSLv2/3, no TLS 1.0/1.1.
+- Certificate revocation checking enabled (`WINHTTP_ENABLE_SSL_REVOCATION`).
+- Default certificate validation (WinHTTP rejects untrusted/mismatched certs by default — no ignore flags set).
+
+### Process hardening
+- `HeapEnableTerminationOnCorruption` — fail-fast on heap corruption.
+- `ProcessExtensionPointDisablePolicy` — blocks AppInit DLL injection.
+- `ProcessStrictHandleCheckPolicy` — raises exception on `CloseHandle(INVALID_HANDLE_VALUE)`.
+
+### Limitations (not implemented)
+- **No AppContainer / low integrity level**: Would break GPU (D3D11 hardware decode), WASAPI audio, and file system access. Mitigation policies above provide partial isolation.
+- **No signed binary**: ProcessSignaturePolicy would block loading MSVC runtime / MF DLLs.
+- **No dynamic code restriction**: ProcessDynamicCodePolicy would break D3DCompile runtime shader compilation.
+- **No network sandbox**: WinHTTP uses default proxy settings; no loopback restriction.
+
 ## Crash history
 
 | Date | Issue | Root cause | Fix |

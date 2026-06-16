@@ -24,7 +24,10 @@ HRESULT MediaSource::GetUint64Pair(IMFAttributes* attr, REFGUID key,
 bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     ComPtr<IMFAttributes> sattrs;
     HRESULT hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        LOG_ERROR("MFCreateAttributes failed: 0x%08lX", hr);
+        return false;
+    }
 
     sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
     if (callback) {
@@ -62,7 +65,7 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
                 return false;
             }
         } else {
-            LOG_ERROR("MFCreateSourceReaderFromURL failed: 0x%08lX", hr);
+            LOG_ERROR("MFCreateSourceReaderFromURL failed: 0x%08lX for %ws", hr, url);
             return false;
         }
     }
@@ -152,6 +155,11 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     LOG_INFO("Streams: video=%lu audio=%lu", video_stream_, audio_stream_);
 
     reader_ = std::move(reader);
+
+    // Report audio/video status to help diagnose silent playback
+    LOG_INFO("Media opened: %s %s",
+             has_video_ ? "video OK" : "NO video",
+             has_audio_ ? "audio OK" : "NO audio");
     return true;
 }
 

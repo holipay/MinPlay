@@ -49,6 +49,18 @@ private:
     int bytes_per_sec_ = 0;
     int buffer_frames_ = 0;
 
+    /*
+     * SPSC ring buffer — single producer (MF callback OnReadSample → ao_->Write)
+     *                   single consumer (WASAPI playback thread → FillBuffer)
+     *
+     * head_ = producer write position (release store so consumer sees written data)
+     * tail_ = consumer read position (release store so producer sees freed space)
+     *
+     * No locks: x86 guarantees single-copy atomicity for aligned ints,
+     * memory_order_release/acquire provides visibility ordering.
+     * RingAvail() loads both with acquire — may see stale head w.r.t. tail
+     * but this is benign (conservative lower bound on available data).
+     */
     uint8_t* ring_ = nullptr;
     int ring_size_ = RING_SIZE;
     std::atomic<int> ring_head_{0};

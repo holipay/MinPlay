@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <cwchar>
+#include <string>
 
 static Player* g_player = nullptr;
 static HWND    g_hwnd   = nullptr;
@@ -82,7 +83,45 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
 }
 
+/* ----- Security: input validation ----- */
+
+// Allowed URI schemes for media playback
+static bool IsSchemeAllowed(const wchar_t* url) {
+    if (!url || !*url) return false;
+    size_t len = wcsnlen_s(url, 2048);
+    if (len == 0 || len >= 2048) return false;
+
+    std::wstring s(url);
+    size_t prot = s.find(L"://");
+    if (prot == std::wstring::npos) return true; // local file — allowed
+
+    std::wstring scheme = s.substr(0, prot);
+    return _wcsicmp(scheme.c_str(), L"http")  == 0 ||
+           _wcsicmp(scheme.c_str(), L"https") == 0;
+}
+
+/* ----- Security: process hardening ----- */
+static void ApplyProcessMitigations() {
+    // Fail-fast on heap corruption
+    HeapSetInformation(nullptr, HeapEnableTerminationOnCorruption, nullptr, 0);
+
+    // Block AppInit DLL injection
+    PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY ep = {};
+    ep.DisableExtensionPoints = TRUE;
+    if (!SetProcessMitigationPolicy(ProcessExtensionPointDisablePolicy, &ep, sizeof(ep)))
+        LOG_WARN("ExtensionPointDisablePolicy not applied (0x%08lX)", GetLastError());
+
+    // Raise exception on CloseHandle(INVALID_HANDLE_VALUE) — catches handle misuse
+    PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY sh = {};
+    sh.RaiseExceptionOnInvalidHandleReference = TRUE;
+    sh.HandleExceptionsPermanentlyEnabled = TRUE;
+    if (!SetProcessMitigationPolicy(ProcessStrictHandleCheckPolicy, &sh, sizeof(sh)))
+        LOG_WARN("StrictHandleCheckPolicy not applied (0x%08lX)", GetLastError());
+}
+
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    ApplyProcessMitigations();
+
     ComInit com;
     HRESULT hrMf = MFStartup(MF_VERSION, 0);
 
@@ -100,6 +139,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     }
     if (wargv) LocalFree(wargv);
 
+    // Input validation: reject disallowed protocols
+    if (!IsSchemeAllowed(url)) {
+        MessageBoxA(nullptr, "Unsupported protocol. Only http://, https://, and local files are allowed.", "Security", MB_OK);
+        return 1;
+    }
+
     WNDCLASSEX wc = {sizeof(wc)};
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = WndProc;
@@ -107,7 +152,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.lpszClassName = TEXT("MinPlay");
-    RegisterClassEx(&wc);
+    if (!RegisterClassEx(&wc)) {
+        MessageBoxA(nullptr, "Failed to register window class", "Error", MB_OK);
+        return 1;
+    }
 
     RECT rc = {0, 0, 1280, 720};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
@@ -116,6 +164,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         CW_USEDEFAULT, CW_USEDEFAULT,
         rc.right - rc.left, rc.bottom - rc.top,
         nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
+    if (!g_hwnd) {
+        MessageBoxA(nullptr, "Failed to create window", "Error", MB_OK);
+        return 1;
+    }
 
     g_player = new (std::nothrow) Player();
     if (!g_player) {
@@ -123,20 +175,24 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         return 1;
     }
     if (!g_player->Open(g_hwnd, url)) {
-        MessageBoxA(nullptr, "Failed to open media file", "Error", MB_OK);
+        // Open() already logs specifics; show generic error to user
+        MessageBoxA(nullptr, "Failed to open media file.\nSee console for details.", "Error", MB_OK);
         delete g_player; g_player = nullptr;
         return 1;
     }
 
     g_player->Play();
-    SetTimer(g_hwnd, TIMER_AUDIO_CHECK, 50, nullptr);
+    if (!SetTimer(g_hwnd, TIMER_AUDIO_CHECK, 50, nullptr))
+        LOG_WARN("Failed to create audio check timer");
     if (g_player->HasVideo()) {
         double fps = g_player->GetVideoFps();
         int period = fps > 0 ? (int)(1000.0 / fps) : 33;
         if (period < 1) period = 1;
-        SetTimer(g_hwnd, TIMER_VIDEO_DISPLAY, period, nullptr);
+        if (!SetTimer(g_hwnd, TIMER_VIDEO_DISPLAY, period, nullptr))
+            LOG_WARN("Failed to create video timer");
     }
-    SetTimer(g_hwnd, TIMER_EOF_CHECK, 500, nullptr);
+    if (!SetTimer(g_hwnd, TIMER_EOF_CHECK, 500, nullptr))
+        LOG_WARN("Failed to create EOF check timer");
 
     /* Fire an immediate video tick to minimize A/V startup gap */
     if (g_player->HasVideo())
@@ -158,6 +214,13 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
 static int RunMessageLoop() {
     __try {
+    /*
+     * Standard Windows message loop.
+     * GetMessage() blocks when the queue is empty — thread sleeps at 0% CPU.
+     * WM_TIMER messages (50ms audio, ~33ms video) wake it periodically.
+     * No Sleep() needed: the kernel wait IS the sleep.
+     * Sleep() in the loop would reduce responsiveness without power benefit.
+     */
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);

@@ -28,6 +28,24 @@ struct WinHttpHandle {
 // HlsByteStream
 // ========================================================================
 
+/*
+ * Custom IMFByteStream that concatenates HLS TS segments on-the-fly.
+ *
+ * Key design points:
+ *   - Read/seek operate over a sorted vector of LoadedSeg (segments appended
+ *     by download thread via AddSegment). Binary search maps global offset
+ *     to segment+offset.
+ *   - Async reads (BeginRead/EndRead): if data is available, complete
+ *     immediately via MFInvokeCallback. If not, queue a PendingRead and
+ *     return E_PENDING — MF treats this as "retry later". When AddSegment
+ *     arrives, FulfillPendingReads re-checks and completes any satisfied reads.
+ *   - EOS protocol: Read() returns S_OK with 0 bytes when data is absent but
+ *     EOS is not set (MF treats 0-bytes-S_OK as "try again"). Only returns
+ *     S_FALSE when has_eos_marker_ is set AND position >= total_bytes_.
+ *     This prevents premature EOF signaling before all segments arrive.
+ *   - needs_wake_: set by AddSegment when new data may restart a stalled
+ *     pipeline. The player's CheckAudio/VideoTick timers poll this flag.
+ */
 HlsByteStream::HlsByteStream() {
     InitializeCriticalSection(&lock_);
 }
@@ -157,6 +175,9 @@ ULONG HlsByteStream::CopyFromSegmentsLocked(BYTE* pb, ULONG cb) {
 
 
 
+/* Sync read: copy from segments under lock. Returns S_OK even with 0 bytes
+ * when data is absent but EOS not signaled — MF will retry
+ * (S_FALSE would trigger MF_SOURCE_READERF_ENDOFSTREAM). */
 STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
     if (!pb) return E_POINTER;
 
@@ -178,6 +199,10 @@ STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
     return S_OK;
 }
 
+/* Async read: if data (or EOS) available, complete immediately on this thread.
+ * Otherwise queue as PENDING — FulfillPendingReads() will satisfy it when
+ * AddSegment delivers new data. MF serializes BeginRead calls (only one
+ * outstanding per byte stream), so async_result_/async_hr_ are safe. */
 STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCallback, IUnknown* pState) {
     if (!pb || !pCallback) return E_POINTER;
 
@@ -274,6 +299,9 @@ void HlsByteStream::AddSegment(const uint8_t* data, size_t size) {
     FulfillPendingReads();
 }
 
+/* Called by AddSegment (download thread) to complete any pending async reads
+ * that can now be satisfied. Reads that still have no data are re-queued.
+ * Lock is released before MFInvokeCallback to avoid reentrancy deadlocks. */
 void HlsByteStream::FulfillPendingReads() {
     std::vector<PendingRead> to_fulfill;
     to_fulfill.swap(pending_reads_);
@@ -400,6 +428,17 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
     WinHttpHandle hRequest(WinHttpOpenRequest(hConnect, L"GET", path.c_str(), nullptr,
         nullptr, nullptr, flags));
     if (!hRequest) return false;
+
+    // Security: restrict TLS to 1.2 and 1.3 (no SSLv2/3, no TLS 1.0/1.1)
+    DWORD tls_protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2
+                        | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURE_PROTOCOLS,
+                     &tls_protocols, sizeof(tls_protocols));
+
+    // Enable certificate revocation checking (OCSP/CRL)
+    DWORD feature = WINHTTP_ENABLE_SSL_REVOCATION;
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_ENABLE_FEATURE,
+                     &feature, sizeof(feature));
 
     // Set timeout
     WinHttpSetTimeouts(hRequest, 5000, 5000, 10000, 10000);
@@ -724,6 +763,17 @@ void HlsManager::ReloadPlaylist() {
     }
 }
 
+/*
+ * Background download thread loop.
+ *
+ * For VOD: downloads all segments sequentially, then sets EOS marker.
+ * For live: after known segments exhausted, calls ReloadPlaylist() to fetch
+ * new segments from server. Waits target_duration_ between reloads to avoid
+ * hammering the server.
+ *
+ * Error handling: 3 retries per segment with 1s delay, then skip.
+ * Pre-buffered segments (first 3 in Open) skip download.
+ */
 void HlsManager::DownloadLoop() {
     int retry_count = 0;
     while (download_running_) {

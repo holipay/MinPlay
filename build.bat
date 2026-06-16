@@ -1,5 +1,19 @@
 @echo off
-call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+setlocal enabledelayedexpansion
+
+rem Try vswhere first (VS 2017+), fall back to default path
+set VS_PATH=
+for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath 2^>nul`) do set VS_PATH=%%i
+if defined VS_PATH (
+    call "%VS_PATH%\VC\Auxiliary\Build\vcvarsall.bat" x64
+) else (
+    rem Fallback: VS 2026 Community default path
+    call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+)
+if %ERRORLEVEL% NEQ 0 (
+    echo Failed to find VS vcvarsall. Install VS or set VS_PATH manually.
+    exit /b 1
+)
 cd /d "%~dp0"
 cl /Od /Zi /W4 /utf-8 /EHsc ^
     src\main.cpp src\core\player.cpp src\core\source_reader_callback.cpp ^

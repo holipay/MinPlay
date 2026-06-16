@@ -1,7 +1,18 @@
 @echo off
-call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+setlocal enabledelayedexpansion
+set VS_PATH=
+for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath 2^>nul`) do set VS_PATH=%%i
+if defined VS_PATH (
+    call "%VS_PATH%\VC\Auxiliary\Build\vcvarsall.bat" x64
+) else (
+    call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+)
+if %ERRORLEVEL% NEQ 0 (
+    echo Failed to find VS vcvarsall.
+    exit /b 1
+)
 cd /d "%~dp0"
-cl /Od /Zi /W4 /utf-8 /EHsc /Fe:MinPlayTests.exe ^
+cl /Od /Zi /FS /W4 /utf-8 /EHsc /FdMinPlayTests.pdb /Fe:MinPlayTests.exe ^
     tests\test_counters.cpp tests\test_main.cpp tests\sync_test.cpp tests\hls_test.cpp ^
     src\sync\sync_context.cpp src\network\hls_stream.cpp ^
     /link ole32.lib oleaut32.lib winhttp.lib shlwapi.lib ^

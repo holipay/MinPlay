@@ -380,6 +380,23 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
 }
 
+/*
+ * VideoTick — main rendering loop (called from WM_TIMER on main thread).
+ *
+ * Frame queue (vq_) producer/consumer:
+ *   Producer: MF callback thread → Player::ProcessVideoFrame
+ *     Pushes VFrame with timestamp + pixel format + data into vq_[tail].
+ *     Posts WM_TIMER to wake main thread if queue was empty.
+ *   Consumer: main thread → VideoTick
+ *     Pops frames from vq_[head], feeds to SyncContext::Decide which
+ *     returns Drop/Wait/Render. Rendered frame is memcpy'd to frame_buf_
+ *     under frame_mutex_, then passed to D3D11 Render().
+ *
+ * Sync: audio clock comes from WASAPI device (IAudioClock::GetPosition)
+ * or fallback from last_write_pts_ minus buffered duration. Video frames
+ * ahead of audio wait; frames behind by >5× sync_window are dropped.
+ * No audio speed adjustment — video-only correction.
+ */
 void Player::VideoTick() {
     if (state_.load(std::memory_order_acquire) != PlayerState::Playing) return;
 
@@ -507,6 +524,14 @@ void Player::RenderD3D(int w, int h) {
     }
 }
 
+/*
+ * CheckAudio — WM_TIMER handler (50 ms interval).
+ *
+ * 1. Live HLS restart: identical stall detection as VideoTick.
+ * 2. Audio ring re-request: if buffered audio falls below threshold,
+ *    request more samples from MF source reader.
+ *    Threshold: 5× bitrate for network (5s buffer), bitrate/5 for local (200ms).
+ */
 void Player::CheckAudio() {
     if (state_.load(std::memory_order_acquire) != PlayerState::Playing) return;
 

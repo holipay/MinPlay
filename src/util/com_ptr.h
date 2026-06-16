@@ -29,6 +29,8 @@ public:
 
     void reset() { if (ptr_) { ptr_->Release(); ptr_ = nullptr; } }
     T* get() const { return ptr_; }
+    // Releases current pointer, then returns address for COM creation functions.
+    // Safe ONLY when the ComPtr is empty (caller's responsibility — standard COM pattern).
     T** operator&() { reset(); return &ptr_; }
     T* operator->() const { return ptr_; }
     explicit operator bool() const { return ptr_ != nullptr; }
@@ -43,6 +45,8 @@ public:
     }
 
     T** GetAddress() { return &ptr_; }
+    // Releases current, returns address — for use with QI/creation functions.
+    // Like operator& but makes the release explicit in the call site.
     T** ReleaseAndGetAddress() { reset(); return &ptr_; }
 };
 
