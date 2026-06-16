@@ -656,6 +656,7 @@ void HlsManager::ReloadPlaylist() {
 }
 
 void HlsManager::DownloadLoop() {
+    int retry_count = 0;
     while (download_running_) {
         int idx = next_segment_to_download_.load(std::memory_order_acquire);
 
@@ -686,10 +687,19 @@ void HlsManager::DownloadLoop() {
 
         std::vector<uint8_t> seg_data;
         if (!DownloadUrl(url.c_str(), seg_data)) {
-            LOG_WARN("HLS: Failed to download segment %d, retrying", idx);
+            retry_count++;
+            if (retry_count >= 3) {
+                LOG_WARN("HLS: Skipping segment %d after %d failures", idx, 3);
+                next_segment_to_download_.store(idx + 1, std::memory_order_release);
+                retry_count = 0;
+                continue;
+            }
+            LOG_WARN("HLS: Failed to download segment %d (attempt %d/3), retrying",
+                     idx, retry_count);
             Sleep(1000);
             continue;
         }
+        retry_count = 0;
 
         byte_stream_->AddSegment(seg_data.data(), seg_data.size());
         consumed_up_to_ = idx + 1;

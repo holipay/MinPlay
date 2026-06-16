@@ -43,8 +43,11 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
     if (!self->running_.load(std::memory_order_relaxed)) return S_OK;
 
     if (FAILED(hrStatus) || (dwStreamFlags & MF_SOURCE_READERF_ERROR)) {
-        LOG_WARN("OnReadSample failed stream=%lu hr=0x%08lX flags=0x%08lX, retrying",
+        LOG_WARN("OnReadSample failed stream=%lu hr=0x%08lX flags=0x%08lX",
                  dwStreamIndex, hrStatus, dwStreamFlags);
+        if (self->reader_) {
+            self->reader_->Flush(dwStreamIndex);
+        }
         if (self->player_ && self->player_->GetHwnd())
             PostMessage(self->player_->GetHwnd(), WM_TIMER,
                         dwStreamIndex == self->video_stream_ ? TIMER_VIDEO_DISPLAY : TIMER_AUDIO_CHECK, 0);

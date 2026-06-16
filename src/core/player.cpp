@@ -502,6 +502,23 @@ void Player::RenderD3D(int w, int h) {
 void Player::CheckAudio() {
     if (state_ != PlayerState::Playing) return;
 
+    // Live HLS: if pipeline stalled and new data arrived, restart
+    if (source_ && source_->IsLive() &&
+        callback_ && (callback_->IsVideoEof() || callback_->IsAudioEof()) &&
+        source_->HlsByteStreamHasData() && source_->HasNewHlsData()) {
+        LOG_INFO("CheckAudio: Live HLS new data, flushing + restarting");
+        if (source_->GetReader()) {
+            IMFSourceReader* r = source_->GetReader();
+            r->Flush(source_->GetVideoStream());
+            r->Flush(source_->GetAudioStream());
+            callback_->ResetVideoEof();
+            callback_->ResetAudioEof();
+            start_time_ = GetTimeSec(perf_freq_);
+            pause_offset_ = 0;
+            if (sync_) sync_->Seek();
+        }
+    }
+
     if (has_audio_ && callback_ && !callback_->IsAudioEof()) {
         int buffered = ao_ ? ao_->GetBuffered() : 0;
         int bps = audio_bytes_per_sec_ > 0 ? audio_bytes_per_sec_ : (44100 * 2 * 2);
