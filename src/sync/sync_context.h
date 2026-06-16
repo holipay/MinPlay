@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 
 enum class SyncAction { Render, Wait, Drop };
 
@@ -29,6 +30,8 @@ private:
     double sync_window_;
     double drop_threshold_;
     double wait_limit_;
-    int stat_drops_ = 0;
-    int stat_frames_ = 0;
+    // Stats counters — accessed from VideoTick and CheckAudio (both main thread,
+    // sequential, so no real race; atomic for future-proofing)
+    std::atomic<int> stat_drops_{0};
+    std::atomic<int> stat_frames_{0};
 };

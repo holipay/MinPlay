@@ -25,11 +25,11 @@ SyncDecision SyncContext::Decide(double video_pts, double audio_clk) {
     SyncDecision d;
     double diff = video_pts - audio_clk;
     d.diff_ms = diff * 1000.0;
-    stat_frames_++;
+    stat_frames_.fetch_add(1, std::memory_order_relaxed);
 
     if (diff < -drop_threshold_) {
         d.action = SyncAction::Drop;
-        stat_drops_++;
+        stat_drops_.fetch_add(1, std::memory_order_relaxed);
     } else if (diff < -sync_window_) {
         d.action = SyncAction::Render;
     } else if (diff < sync_window_) {
@@ -46,6 +46,6 @@ SyncDecision SyncContext::Decide(double video_pts, double audio_clk) {
 }
 
 void SyncContext::Seek() {
-    stat_drops_ = 0;
-    stat_frames_ = 0;
+    stat_drops_.store(0, std::memory_order_relaxed);
+    stat_frames_.store(0, std::memory_order_relaxed);
 }

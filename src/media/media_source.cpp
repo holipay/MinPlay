@@ -193,7 +193,7 @@ void MediaSource::ReconfigureVideo() {
 bool MediaSource::OpenHls(const wchar_t* url) {
     hls_ = new (std::nothrow) HlsManager();
     if (!hls_) {
-        LOG_ERROR("Out of memory: HlsManager");
+        LOG_CRITICAL("Out of memory: HlsManager");
         return false;
     }
     if (!hls_->Open(url)) {

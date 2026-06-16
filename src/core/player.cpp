@@ -13,6 +13,10 @@ Player::Player() {
     QueryPerformanceFrequency(&perf_freq_);
     frame_buf_size_ = 3840 * 2160 * 4;
     frame_buf_ = (uint8_t*)malloc(frame_buf_size_);
+    if (!frame_buf_) {
+        LOG_CRITICAL("Out of memory: frame_buf_ (%d bytes)", frame_buf_size_);
+        frame_buf_size_ = 0;
+    }
 }
 
 Player::~Player() {
@@ -27,21 +31,23 @@ double Player::GetTimeSec(const LARGE_INTEGER& freq) {
 
 double Player::ElapsedSec() const {
     LARGE_INTEGER freq = perf_freq_;
-    return GetTimeSec(freq) - start_time_ - pause_offset_;
+    return GetTimeSec(freq) - start_time_.load(std::memory_order_relaxed) - pause_offset_.load(std::memory_order_relaxed);
 }
 
 bool Player::Open(HWND hwnd, const wchar_t* url) {
     hwnd_ = hwnd;
 
+    // COM self-deleting object: ref_count_ starts at 1, Release() calls delete this when 0.
+    // Must use Release() (not delete) to release the initial reference.
     callback_ = new (std::nothrow) SourceReaderCallback();
     if (!callback_) {
-        LOG_ERROR("Out of memory: callback_");
+        LOG_CRITICAL("Out of memory: callback_");
         return false;
     }
 
     source_ = new (std::nothrow) MediaSource();
     if (!source_) {
-        LOG_ERROR("Out of memory: source_");
+        LOG_CRITICAL("Out of memory: source_");
         callback_->Release(); callback_ = nullptr;
         return false;
     }
@@ -62,14 +68,14 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
         VideoInfo vi = source_->GetVideoInfo();
         frame_w_ = vi.width;
         frame_h_ = vi.height;
-        video_fps_.store(vi.fps, std::memory_order_relaxed);
+        video_fps_ = vi.fps;
     }
 
     if (has_audio_) {
         AudioInfo ai = source_->GetAudioInfo();
         ao_ = new (std::nothrow) WasapiAudioOutput();
         if (!ao_) {
-            LOG_ERROR("Out of memory: ao_");
+            LOG_CRITICAL("Out of memory: ao_");
             has_audio_ = false;
         } else if (!static_cast<WasapiAudioOutput*>(ao_)->Initialize(
                 ai.sample_rate, ai.channels, ai.bits_per_sample)) {
@@ -82,12 +88,12 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
         }
     }
 
-    double sync_window = 0.020;
+    double sync_window = SYNC_WINDOW_DEFAULT;
     if (ao_ && ao_->IsExclusive())
-        sync_window = 0.010;
+        sync_window = SYNC_WINDOW_EXCLUSIVE;
     sync_ = new (std::nothrow) SyncContext(sync_window);
     if (!sync_) {
-        LOG_ERROR("Out of memory: sync_");
+        LOG_CRITICAL("Out of memory: sync_");
         return false;
     }
 
@@ -96,9 +102,11 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
     win_w_ = rc.right;
     win_h_ = rc.bottom;
 
+    // Release any stale vo_ before creating new (safe for re-Open)
+    delete vo_; vo_ = nullptr;
     D3D11VideoOutput* d3d_vo = new (std::nothrow) D3D11VideoOutput();
     if (!d3d_vo) {
-        LOG_ERROR("Out of memory: d3d_vo");
+        LOG_CRITICAL("Out of memory: d3d_vo");
     } else if (!d3d_vo->Initialize(hwnd, win_w_, win_h_)) {
         LOG_ERROR("Failed to initialize D3D11 video output");
         delete d3d_vo;
@@ -108,7 +116,7 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
 
     osd_ = new (std::nothrow) OSD();
     if (!osd_)
-        LOG_ERROR("Out of memory: osd_");
+        LOG_CRITICAL("Out of memory: osd_");
 
     callback_->SetPlayer(this);
     callback_->SetReader(source_->GetReader(),
@@ -122,8 +130,8 @@ void Player::Close() {
 
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
-        vq_head_.store(0, std::memory_order_relaxed);
-        vq_tail_.store(0, std::memory_order_relaxed);
+        vq_head_ = 0;
+        vq_tail_ = 0;
     }
 
     if (callback_) callback_->ClearPointers();
@@ -134,11 +142,10 @@ void Player::Close() {
     delete osd_;      osd_ = nullptr;
 
     if (source_) { source_->Close(); delete source_; source_ = nullptr; }
+    // Release() for COM self-deleting object (delete this on refcount 0)
     if (callback_) { callback_->Release(); callback_ = nullptr; }
-}
 
-void Player::Destroy() {
-    Close();
+    // Owned heap buffers — free here so Close is fully self-contained
     for (int i = 0; i < VQ_SIZE; i++) {
         free(vq_[i].data);
         vq_[i].data = nullptr;
@@ -147,11 +154,15 @@ void Player::Destroy() {
     frame_buf_ = nullptr;
 }
 
+void Player::Destroy() {
+    Close();
+}
+
 void Player::Play() {
     if (!source_) return;
     state_.store(PlayerState::Playing, std::memory_order_release);
-    start_time_ = GetTimeSec(perf_freq_);
-    pause_offset_ = 0;
+    start_time_.store(GetTimeSec(perf_freq_), std::memory_order_relaxed);
+    pause_offset_.store(0, std::memory_order_relaxed);
 
     video_first_frame_post_.store(1, std::memory_order_release);
     if (ao_) ao_->Resume();
@@ -161,13 +172,13 @@ void Player::Play() {
 void Player::PauseToggle() {
     if (state_.load(std::memory_order_acquire) == PlayerState::Playing) {
         state_.store(PlayerState::Paused, std::memory_order_release);
-        pause_start_ = GetTimeSec(perf_freq_);
+        pause_start_.store(GetTimeSec(perf_freq_), std::memory_order_relaxed);
         if (callback_) callback_->Stop();
         if (ao_) ao_->Pause();
         KillTimer(hwnd_, TIMER_VIDEO_DISPLAY);
     } else if (state_.load(std::memory_order_acquire) == PlayerState::Paused) {
         state_.store(PlayerState::Playing, std::memory_order_release);
-        pause_offset_ += GetTimeSec(perf_freq_) - pause_start_;
+        pause_offset_.store(GetTimeSec(perf_freq_) - pause_start_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         if (ao_) ao_->Resume();
         if (callback_) callback_->StartReading();
         if (has_video_) {
@@ -191,8 +202,8 @@ void Player::Seek(double seconds) {
 
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
-        vq_head_.store(0, std::memory_order_relaxed);
-        vq_tail_.store(0, std::memory_order_relaxed);
+        vq_head_ = 0;
+        vq_tail_ = 0;
     }
 
     source_->Seek(seconds);
@@ -204,8 +215,8 @@ void Player::Seek(double seconds) {
 
     if (was_playing) {
         state_.store(PlayerState::Playing, std::memory_order_release);
-        start_time_ = GetTimeSec(perf_freq_) - seconds;
-        pause_offset_ = 0;
+        start_time_.store(GetTimeSec(perf_freq_) - seconds, std::memory_order_relaxed);
+        pause_offset_.store(0, std::memory_order_relaxed);
         video_first_frame_post_.store(1, std::memory_order_release);
         if (ao_) ao_->Resume();
         if (callback_) callback_->StartReading();
@@ -214,7 +225,8 @@ void Player::Seek(double seconds) {
 
 double Player::GetDuration() const {
     if (source_ && source_->IsLive()) return -1;
-    return source_ ? source_->Duration() : 0;
+    if (!source_) return -1;  // unknown, not zero-length
+    return source_->Duration();
 }
 
 double Player::GetPosition() const {
@@ -230,7 +242,9 @@ void Player::Resize(int w, int h) {
 }
 
 void Player::Paint(HDC /*hdc*/, int /*w*/, int /*h*/) {
-    // D3D11 rendering — WM_PAINT is a no-op
+    // D3D11 renders via the video timer, not GDI.  Force a redraw so the
+    // window is refreshed after being uncovered (e.g. alt+tab back).
+    PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
 }
 
 bool Player::IsFinished() const {
@@ -238,7 +252,7 @@ bool Player::IsFinished() const {
     bool vq_empty;
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
-        vq_empty = (vq_head_.load(std::memory_order_relaxed) == vq_tail_.load(std::memory_order_relaxed));
+        vq_empty = (vq_head_ == vq_tail_);
     }
     bool f_ready;
     {
@@ -333,33 +347,33 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 
     if (vq_fmt == PixelFormat::YUY2 && fw > 0 && fh > 0) {
         converted = ConvertYUY2ToNV12(data, fw, fh);
-        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; frame_size = (int)((size_t)fw * fh * 3 / 2); }
+        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; frame_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX); }
         else { buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
     } else if (vq_fmt == PixelFormat::I420 && fw > 0 && fh > 0) {
         converted = ConvertI420ToNV12(data, fw, fh);
-        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; frame_size = (int)((size_t)fw * fh * 3 / 2); }
+        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; frame_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX); }
         else { buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
     }
 
     bool was_empty;
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
-        was_empty = (vq_head_.load(std::memory_order_relaxed) == vq_tail_.load(std::memory_order_relaxed));
-        int next_tail = (vq_tail_.load(std::memory_order_relaxed) + 1) % VQ_SIZE;
-        if (next_tail == vq_head_.load(std::memory_order_relaxed)) {
+        was_empty = (vq_head_ == vq_tail_);
+        int next_tail = (vq_tail_ + 1) % VQ_SIZE;
+        if (next_tail == vq_head_) {
             // queue full — drop oldest frame (buffer stays for reuse)
-            int old_head = vq_head_.load(std::memory_order_relaxed);
+            int old_head = vq_head_;
             vq_[old_head].size = 0;
-            vq_head_.store((old_head + 1) % VQ_SIZE, std::memory_order_relaxed);
+            vq_head_ = (old_head + 1) % VQ_SIZE;
             if (callback_) callback_->ConsumeVideo();
         }
-        VFrame* f = &vq_[vq_tail_.load(std::memory_order_relaxed)];
+        VFrame* f = &vq_[vq_tail_];
         // Reuse existing buffer if large enough; else realloc (rare: resolution change)
         if (!f->data || f->size < frame_size) {
             free(f->data);
             f->data = (uint8_t*)malloc(frame_size);
             if (!f->data) {
-                LOG_ERROR("Out of memory: ProcessVideoFrame frame buffer");
+                LOG_CRITICAL("Out of memory: ProcessVideoFrame frame buffer");
                 if (callback_) callback_->ConsumeVideo();
                 free(converted);
                 buf->Unlock();
@@ -370,7 +384,7 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         f->size = frame_size;
         f->timestamp = timestamp / 10000000.0;
         f->pix_fmt = vq_fmt;
-        vq_tail_.store(next_tail, std::memory_order_relaxed);
+        vq_tail_ = next_tail;
     }
 
     free(converted);
@@ -419,12 +433,12 @@ void Player::VideoTick() {
     }
 
     // Keep pipeline fed (network: keep at least 15 frames buffered)
-    int video_fill_target = is_network_ ? 15 : 1;
+    int video_fill_target = is_network_ ? VIDEO_FILL_NETWORK : VIDEO_FILL_LOCAL;
     if (has_video_ && callback_ && !callback_->IsVideoEof()) {
         int qsize;
         {
             std::lock_guard<std::mutex> lock(vq_mutex_);
-            qsize = vq_tail_.load(std::memory_order_relaxed) - vq_head_.load(std::memory_order_relaxed);
+            qsize = vq_tail_ - vq_head_;
             if (qsize < 0) qsize += VQ_SIZE;
         }
         if (qsize < video_fill_target)
@@ -446,8 +460,8 @@ void Player::VideoTick() {
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
         while (true) {
-            int head = vq_head_.load(std::memory_order_relaxed);
-            int tail = vq_tail_.load(std::memory_order_relaxed);
+            int head = vq_head_;
+            int tail = vq_tail_;
             if (head == tail) break;
 
             VFrame* f = &vq_[head];
@@ -457,7 +471,7 @@ void Player::VideoTick() {
 
             if (sd.action == SyncAction::Drop && has_more) {
                 f->size = 0;
-                vq_head_.store(next, std::memory_order_relaxed);
+                vq_head_ = next;
                 callback_->ConsumeVideo();
                 continue;
             }
@@ -485,7 +499,7 @@ void Player::VideoTick() {
                 }
             }
             f->size = 0;
-            vq_head_.store(next, std::memory_order_relaxed);
+            vq_head_ = next;
             callback_->ConsumeVideo();
             rendered = true;
             break;
@@ -494,7 +508,8 @@ void Player::VideoTick() {
 
     // Render
     if (rendered && win_w_ > 0 && win_h_ > 0)
-        RenderD3D(win_w_, win_h_);
+        if (!RenderD3D(win_w_, win_h_))
+            LOG_WARN("RenderD3D: no frame rendered (vo_ uninitialized or no ready frame)");
 }
 
 void Player::OnVideoFormatChanged() {
@@ -506,7 +521,7 @@ void Player::OnVideoFormatChanged() {
         std::lock_guard<std::mutex> lock(vq_mutex_);
         if (vi.width > 0) frame_w_ = vi.width;
         if (vi.height > 0) frame_h_ = vi.height;
-        if (vi.fps > 0) video_fps_.store(vi.fps, std::memory_order_relaxed);
+        if (vi.fps > 0) video_fps_ = vi.fps;
         pix_fmt_ = fmt;
     }
     LOG_INFO("Player video format updated: %dx%d @ %.1f fps",
@@ -514,14 +529,16 @@ void Player::OnVideoFormatChanged() {
              video_fps_.load(std::memory_order_relaxed));
 }
 
-void Player::RenderD3D(int w, int h) {
-    if (!vo_) return;
+bool Player::RenderD3D(int w, int h) {
+    if (!vo_) return false;
     std::lock_guard<std::mutex> lock(frame_mutex_);
     if (frame_ready_ && frame_buf_ && frame_w_ > 0 && frame_h_ > 0) {
         vo_->Resize(w, h);
         vo_->Render(frame_buf_, frame_w_, frame_h_, frame_size_, pix_fmt_);
         frame_ready_ = false;
+        return true;
     }
+    return false;
 }
 
 /*
@@ -557,7 +574,7 @@ void Player::CheckAudio() {
     if (has_audio_ && callback_ && !callback_->IsAudioEof()) {
         int buffered = ao_ ? ao_->GetBuffered() : 0;
         int bps = audio_bytes_per_sec_ > 0 ? audio_bytes_per_sec_ : (44100 * 2 * 2);
-        int threshold = is_network_ ? bps * 5 : bps / 5;
+        int threshold = (std::max)(1, is_network_ ? bps * AUDIO_BUFFER_NETWORK_MULT : bps / AUDIO_BUFFER_LOCAL_DIV);
         if (buffered < threshold) {
             callback_->RequestAudioRead();
         }

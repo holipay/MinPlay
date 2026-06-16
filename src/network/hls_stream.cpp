@@ -657,7 +657,7 @@ bool HlsManager::Open(const wchar_t* url) {
     // Create byte stream
     byte_stream_ = new (std::nothrow) HlsByteStream();
     if (!byte_stream_) {
-        LOG_ERROR("Out of memory: HlsByteStream");
+        LOG_CRITICAL("Out of memory: HlsByteStream");
         return false;
     }
 

@@ -16,6 +16,18 @@
 #define TIMER_VIDEO_DISPLAY 2
 #define TIMER_EOF_CHECK     3
 
+// Audio buffering thresholds
+constexpr int AUDIO_BUFFER_NETWORK_MULT = 5;   // 5 × bitrate for network (5 s buffer)
+constexpr int AUDIO_BUFFER_LOCAL_DIV   = 5;   // bitrate / 5 for local (200 ms buffer)
+
+// Video queue fill targets (out of VQ_SIZE = 32)
+constexpr int VIDEO_FILL_NETWORK = 15;  // keep 15+ frames for network
+constexpr int VIDEO_FILL_LOCAL   = 1;   // 1+ frame for local files
+
+// A/V sync defaults
+constexpr double SYNC_WINDOW_DEFAULT   = 0.020;  // 20 ms tolerance
+constexpr double SYNC_WINDOW_EXCLUSIVE = 0.010;  // 10 ms for exclusive-mode WASAPI
+
 enum class PlayerState : int { Stopped, Playing, Paused };
 
 class Player {
@@ -77,14 +89,15 @@ private:
     std::atomic<double> video_fps_{30.0};
 
     LARGE_INTEGER perf_freq_{};
-    double start_time_ = 0;
-    double pause_offset_ = 0;
-    double pause_start_ = 0;
+    std::atomic<double> start_time_{0};
+    std::atomic<double> pause_offset_{0};
+    std::atomic<double> pause_start_{0};
 
     // Frame queue (producer: MF callback, consumer: main thread)
+    // All accesses are under vq_mutex_ — plain int is sufficient
     VFrame vq_[VQ_SIZE];
-    std::atomic<int> vq_head_{0};
-    std::atomic<int> vq_tail_{0};
+    int vq_head_ = 0;
+    int vq_tail_ = 0;
     mutable std::mutex vq_mutex_;
 
     // Render frame buffer
@@ -109,5 +122,5 @@ private:
 
     static uint8_t* ConvertYUY2ToNV12(const uint8_t* yuy2, int w, int h);
     static uint8_t* ConvertI420ToNV12(const uint8_t* i420, int w, int h);
-    void RenderD3D(int w, int h);
+    bool RenderD3D(int w, int h);
 };
