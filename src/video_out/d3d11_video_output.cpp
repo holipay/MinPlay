@@ -293,6 +293,10 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int dat
     if (hr == DXGI_STATUS_OCCLUDED) {
         // Window is occluded — skip render, don't sleep (blocks message loop)
         return;
+    } else if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+        LOG_WARN("D3D11 device lost (0x%08lX) — releasing resources", hr);
+        ReleaseD3D11();
+        return;
     } else if (FAILED(hr)) {
         LOG_WARN("Present failed: 0x%08lX", hr);
     }
@@ -303,6 +307,11 @@ void D3D11VideoOutput::Resize(int w, int h) {
     if (win_w_ == w && win_h_ == h) return;
 
     HRESULT hr = swap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+        LOG_WARN("D3D11 device lost during Resize — releasing resources");
+        ReleaseD3D11();
+        return;
+    }
     if (FAILED(hr)) {
         LOG_WARN("ResizeBuffers failed: 0x%08lX", hr);
         return;

@@ -41,7 +41,7 @@ Data flow: MF callback → audio direct to ring / video `player_process_video_fr
 - **No Sleep in message loop**: Blocks message dispatch, freezes window.
 - **Resample ratio**: `ratio = in_rate / out_rate * speed`. NOT `/ speed` — that inverts the direction and creates positive feedback.
 - **Frame alignment in ao_write**: `to_write` is clamped to `in_frame_bytes` boundary to prevent ring corruption.
-- **Video format negotiation**: Tries ARGB32 → RGB32(1) → RGB32(2) → NV12 → YUY2 → I420. NV12/RGB32 pass through to GPU directly; YUY2/I420 are converted to NV12 (data rearrangement, no color math) in `ProcessVideoFrame` (runs in MF callback thread).
+- **Video format negotiation**: Tries NV12 → I420 → YUY2 → ARGB32 → RGB32 (prefers native GPU-friendly NV12). NV12/RGB32 pass through to GPU directly; YUY2/I420 are converted to NV12 (data rearrangement, no color math) in `ProcessVideoFrame` (runs in MF callback thread). If all formats fail, `has_video_` stays false and no video is rendered.
 - **Chinese filenames**: Uses `CommandLineToArgvW` (not `MultiByteToWideChar(CP_UTF8)`) because `argv` uses system codepage on Windows.
 - **prebuf removed from WASAPI init**: MF source reader delivers small audio fragments (< prebuf threshold), causing WAV hang. Prebuf initialization was removed from `ao_wasapi.c`/`WasapiAudioOutput::Initialize`.
 - **HLS via IMFByteStream**: Windows has no built-in HLS scheme handler (MF_E_UNSUPPORTED_BYTESTREAM_TYPE). Fallback: custom HlsByteStream (IMFByteStream) + MFCreateSourceReaderFromByteStream. TS segments downloaded via WinHTTP in background thread.
