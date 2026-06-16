@@ -1,5 +1,6 @@
 #include "player.h"
 #include "../media/media_source.h"
+#include "../util/yuv_convert.h"
 #include "../video_out/d3d11_video_output.h"
 #include "../audio_out/wasapi_audio_output.h"
 #include "../util/log.h"
@@ -30,15 +31,34 @@ double Player::GetTimeSec(const LARGE_INTEGER& freq) {
 }
 
 double Player::ElapsedSec() const {
-    LARGE_INTEGER freq = perf_freq_;
-    return GetTimeSec(freq) - start_time_.load(std::memory_order_relaxed) - pause_offset_.load(std::memory_order_relaxed);
+    double now = GetTimeSec(perf_freq_);
+    double ps = pause_start_.load(std::memory_order_acquire);
+    double st = start_time_.load(std::memory_order_acquire);
+    double po = pause_offset_.load(std::memory_order_acquire);
+    // If paused, freeze at the moment pause was entered
+    if (ps > 0)
+        return ps - st - po;
+    return now - st - po;
+}
+
+void Player::StartVideoTimer() {
+    if (!has_video_ || !hwnd_) return;
+    double fps = video_fps_.load(std::memory_order_acquire);
+    if (fps <= 0) fps = 30.0;
+    int period = (int)(1000.0 / fps);
+    if (period < 1) period = 1;
+    SetTimer(hwnd_, TIMER_VIDEO_DISPLAY, period, nullptr);
+}
+
+void Player::StopVideoTimer() {
+    if (hwnd_) {
+        KillTimer(hwnd_, TIMER_VIDEO_DISPLAY);
+    }
 }
 
 bool Player::Open(HWND hwnd, const wchar_t* url) {
     hwnd_ = hwnd;
 
-    // COM self-deleting object: ref_count_ starts at 1, Release() calls delete this when 0.
-    // Must use Release() (not delete) to release the initial reference.
     callback_ = new (std::nothrow) SourceReaderCallback();
     if (!callback_) {
         LOG_CRITICAL("Out of memory: callback_");
@@ -103,7 +123,6 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
     win_w_ = rc.right;
     win_h_ = rc.bottom;
 
-    // Release any stale vo_ before creating new (safe for re-Open)
     delete vo_; vo_ = nullptr;
     D3D11VideoOutput* d3d_vo = new (std::nothrow) D3D11VideoOutput();
     if (!d3d_vo) {
@@ -127,7 +146,20 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
 }
 
 void Player::Close() {
+    // Kill timers first to prevent WM_TIMER callbacks during teardown
+    StopVideoTimer();
+    if (hwnd_) {
+        KillTimer(hwnd_, TIMER_AUDIO_CHECK);
+        KillTimer(hwnd_, TIMER_EOF_CHECK);
+    }
+
     if (callback_) callback_->Stop();
+
+    // Stop audio output before releasing objects
+    if (ao_) {
+        ao_->Pause();
+        ao_->Reset();
+    }
 
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
@@ -143,48 +175,57 @@ void Player::Close() {
     delete osd_;      osd_ = nullptr;
 
     if (source_) { source_->Close(); delete source_; source_ = nullptr; }
-    // Release() for COM self-deleting object (delete this on refcount 0)
     if (callback_) { callback_->Release(); callback_ = nullptr; }
 
-    // Owned heap buffers — free here so Close is fully self-contained
     for (int i = 0; i < VQ_SIZE; i++) {
         free(vq_[i].data);
         vq_[i].data = nullptr;
     }
     free(frame_buf_);
     frame_buf_ = nullptr;
+    state_.store(PlayerState::Stopped, std::memory_order_release);
 }
 
 void Player::Play() {
     if (!source_) return;
+    if (state_.load(std::memory_order_acquire) != PlayerState::Stopped) return;
+
     state_.store(PlayerState::Playing, std::memory_order_release);
-    start_time_.store(GetTimeSec(perf_freq_), std::memory_order_relaxed);
-    pause_offset_.store(0, std::memory_order_relaxed);
+    start_time_.store(GetTimeSec(perf_freq_), std::memory_order_release);
+    pause_offset_.store(0, std::memory_order_release);
+    pause_start_.store(0, std::memory_order_release);
 
     video_first_frame_post_.store(1, std::memory_order_release);
     if (ao_) ao_->Resume();
     if (callback_) callback_->StartReading();
+    StartVideoTimer();
+    if (has_video_)
+        PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
 }
 
 void Player::PauseToggle() {
     if (state_.load(std::memory_order_acquire) == PlayerState::Playing) {
         state_.store(PlayerState::Paused, std::memory_order_release);
-        pause_start_.store(GetTimeSec(perf_freq_), std::memory_order_relaxed);
+        pause_start_.store(GetTimeSec(perf_freq_), std::memory_order_release);
         if (callback_) callback_->Stop();
         if (ao_) ao_->Pause();
-        KillTimer(hwnd_, TIMER_VIDEO_DISPLAY);
+        StopVideoTimer();
     } else if (state_.load(std::memory_order_acquire) == PlayerState::Paused) {
+        // Accumulate pause duration, don't overwrite.
+        // pause_offset_ += (now - pause_start_)
+        double now = GetTimeSec(perf_freq_);
+        double prev = pause_offset_.load(std::memory_order_acquire);
+        double ps = pause_start_.load(std::memory_order_acquire);
+        if (ps > 0) {
+            pause_offset_.store(prev + (now - ps), std::memory_order_release);
+            pause_start_.store(0, std::memory_order_release);
+        }
         state_.store(PlayerState::Playing, std::memory_order_release);
-        pause_offset_.store(GetTimeSec(perf_freq_) - pause_start_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         if (ao_) ao_->Resume();
         if (callback_) callback_->StartReading();
-        if (has_video_) {
-            double fps = video_fps_.load(std::memory_order_acquire) > 0 ? video_fps_.load(std::memory_order_acquire) : 30.0;
-            int period = (int)(1000.0 / fps);
-            if (period < 1) period = 1;
-            SetTimer(hwnd_, TIMER_VIDEO_DISPLAY, period, nullptr);
+        StartVideoTimer();
+        if (has_video_)
             PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
-        }
     }
 }
 
@@ -193,9 +234,11 @@ void Player::Seek(double seconds) {
     if (source_->IsLive()) return;
     if (seconds < 0) seconds = 0;
     bool was_playing = (state_.load(std::memory_order_acquire) == PlayerState::Playing);
+    bool was_paused  = (state_.load(std::memory_order_acquire) == PlayerState::Paused);
 
     if (callback_) callback_->Stop();
     if (ao_) ao_->Reset();
+    StopVideoTimer();
 
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
@@ -210,19 +253,43 @@ void Player::Seek(double seconds) {
         frame_ready_ = false;
     }
 
+    // Update time base so ElapsedSec() returns the seeked position
+    double now = GetTimeSec(perf_freq_);
+    if (was_paused) {
+        // During pause, ElapsedSec = pause_start_ - start_time_ - pause_offset_
+        // We want: seconds = pause_start_ - new_start_time_ - pause_offset_
+        double po = pause_offset_.load(std::memory_order_acquire);
+        double ps = pause_start_.load(std::memory_order_acquire);
+        start_time_.store(ps - seconds - po, std::memory_order_release);
+        // pause_offset_ and pause_start_ stay unchanged — ElapsedSec will still freeze
+        // at the correct new position because pause_start_ hasn't moved.
+        // Actually we need to adjust: currently ElapsedSec() = ps - start_time - po
+        // With new start_time = ps - seconds - po:
+        //   ElapsedSec = ps - (ps - seconds - po) - po = seconds ✓
+    } else {
+        start_time_.store(now - seconds, std::memory_order_release);
+        pause_offset_.store(0, std::memory_order_release);
+        pause_start_.store(0, std::memory_order_release);
+    }
+
+    video_first_frame_post_.store(1, std::memory_order_release);
+
     if (was_playing) {
         state_.store(PlayerState::Playing, std::memory_order_release);
-        start_time_.store(GetTimeSec(perf_freq_) - seconds, std::memory_order_relaxed);
-        pause_offset_.store(0, std::memory_order_relaxed);
-        video_first_frame_post_.store(1, std::memory_order_release);
         if (ao_) ao_->Resume();
         if (callback_) callback_->StartReading();
+        StartVideoTimer();
+        if (has_video_)
+            PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
+    } else if (was_paused) {
+        // Stay paused — just post a Paint so OSD updates
+        InvalidateRect(hwnd_, nullptr, FALSE);
     }
 }
 
 double Player::GetDuration() const {
     if (source_ && source_->IsLive()) return -1;
-    if (!source_) return -1;  // unknown, not zero-length
+    if (!source_) return -1;
     return source_->Duration();
 }
 
@@ -264,53 +331,44 @@ bool Player::IsFinished() const {
 }
 
 uint8_t* Player::ConvertYUY2ToNV12(const uint8_t* yuy2, int w, int h) {
-    // YUY2: 2 pixels per 4 bytes. Clamp to even width to avoid OOB on odd widths.
-    w &= ~1;
-    if (w < 2) return nullptr;
-    size_t y_size = (size_t)w * h;
-    size_t nv12_size = y_size + y_size / 2;
-    uint8_t* nv12 = (uint8_t*)malloc(nv12_size);
-    if (!nv12) return nullptr;
-
-    uint8_t* yp = nv12;
-    uint8_t* uvp = nv12 + y_size;
-    for (int row = 0; row < h; row++) {
-        for (int col = 0; col < w; col += 2) {
-            int src_idx = (row * w + col) * 2;
-            yp[row * w + col]     = yuy2[src_idx];
-            yp[row * w + col + 1] = yuy2[src_idx + 2];
-            if ((row & 1) == 0) {
-                int uv_idx = (row / 2) * w + col;
-                uvp[uv_idx]     = yuy2[src_idx + 1];
-                uvp[uv_idx + 1] = yuy2[src_idx + 3];
-            }
-        }
-    }
-    return nv12;
+    return ::ConvertYUY2ToNV12(yuy2, w, h);
 }
 
 uint8_t* Player::ConvertI420ToNV12(const uint8_t* i420, int w, int h) {
-    size_t y_size = (size_t)w * h;
-    size_t nv12_size = y_size + y_size / 2;
-    uint8_t* nv12 = (uint8_t*)malloc(nv12_size);
-    if (!nv12) return nullptr;
+    return ::ConvertI420ToNV12(i420, w, h);
+}
 
-    memcpy(nv12, i420, y_size);
-    uint8_t* uvp = nv12 + y_size;
-    const uint8_t* up = i420 + y_size;
-    const uint8_t* vp = up + (w / 2) * (h / 2);
+void Player::TryRestartLivePipeline() {
+    if (!source_ || !source_->IsLive() || !callback_) return;
+    if (!source_->HlsByteStreamHasData() || !source_->HasNewHlsData()) return;
+    if (!callback_->IsVideoEof() && !callback_->IsAudioEof()) return;
 
-    for (int row = 0; row < h / 2; row++) {
-        for (int col = 0; col < w / 2; col++) {
-            uvp[row * w + col * 2]     = up[row * (w / 2) + col];
-            uvp[row * w + col * 2 + 1] = vp[row * (w / 2) + col];
-        }
+    // Prevent concurrent restart from both VideoTick and CheckAudio
+    bool expected = false;
+    if (!live_restarting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        return;
+
+    LOG_INFO("Live: new HLS data, flushing + restarting pipeline");
+    if (source_->GetReader()) {
+        IMFSourceReader* r = source_->GetReader();
+        r->Flush(source_->GetVideoStream());
+        r->Flush(source_->GetAudioStream());
+        callback_->ResetVideoEof();
+        callback_->ResetAudioEof();
+        // Reset clock so new frame timestamps (~0) match the wall clock
+        double now = GetTimeSec(perf_freq_);
+        start_time_.store(now, std::memory_order_release);
+        pause_offset_.store(0, std::memory_order_release);
+        pause_start_.store(0, std::memory_order_release);
+        if (sync_) sync_->Seek();
+        callback_->RequestVideoRead();
+        callback_->RequestAudioRead();
     }
-    return nv12;
+
+    live_restarting_.store(false, std::memory_order_release);
 }
 
 void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
-    // ConsumeVideo() balances fetch_add in StartReading / RequestVideoRead / re-request.
     if (!sample) return;
     if (state_.load(std::memory_order_acquire) != PlayerState::Playing) {
         if (callback_) callback_->ConsumeVideo();
@@ -334,7 +392,6 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     int frame_size = (int)(std::min)(cur_len_dw, (DWORD)INT_MAX);
     uint8_t* converted = nullptr;
 
-    // Read frame dimensions + format under vq_mutex_ (same lock as VideoTick)
     int fw, fh, fs;
     PixelFormat vq_fmt;
     {
@@ -361,14 +418,12 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         was_empty = (vq_head_ == vq_tail_);
         int next_tail = (vq_tail_ + 1) % VQ_SIZE;
         if (next_tail == vq_head_) {
-            // queue full — drop oldest frame (buffer stays for reuse)
             int old_head = vq_head_;
             vq_[old_head].size = 0;
             vq_head_ = (old_head + 1) % VQ_SIZE;
             if (callback_) callback_->ConsumeVideo();
         }
         VFrame* f = &vq_[vq_tail_];
-        // Reuse existing buffer if large enough; else realloc (rare: resolution change)
         if (!f->data || f->size < frame_size) {
             free(f->data);
             f->data = (uint8_t*)malloc(frame_size);
@@ -397,41 +452,12 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 
 /*
  * VideoTick — main rendering loop (called from WM_TIMER on main thread).
- *
- * Frame queue (vq_) producer/consumer:
- *   Producer: MF callback thread → Player::ProcessVideoFrame
- *     Pushes VFrame with timestamp + pixel format + data into vq_[tail].
- *     Posts WM_TIMER to wake main thread if queue was empty.
- *   Consumer: main thread → VideoTick
- *     Pops frames from vq_[head], feeds to SyncContext::Decide which
- *     returns Drop/Wait/Render. Rendered frame is memcpy'd to frame_buf_
- *     under frame_mutex_, then passed to D3D11 Render().
- *
- * Sync: audio clock comes from WASAPI device (IAudioClock::GetPosition)
- * or fallback from last_write_pts_ minus buffered duration. Video frames
- * ahead of audio wait; frames behind by >5× sync_window are dropped.
- * No audio speed adjustment — video-only correction.
  */
 void Player::VideoTick() {
     if (state_.load(std::memory_order_acquire) != PlayerState::Playing) return;
 
-    // Live HLS: if a stream stalled and new data arrived, restart the pipeline
-    if (source_ && source_->IsLive() &&
-        callback_ && (callback_->IsVideoEof() || callback_->IsAudioEof()) &&
-        source_->HlsByteStreamHasData() && source_->HasNewHlsData()) {
-        LOG_INFO("Live: new HLS data, flushing + restarting pipeline");
-        if (source_->GetReader()) {
-            IMFSourceReader* r = source_->GetReader();
-            r->Flush(source_->GetVideoStream());
-            r->Flush(source_->GetAudioStream());
-            callback_->ResetVideoEof();
-            callback_->ResetAudioEof();
-            // Reset clock so new frame timestamps (~0) match the wall clock
-            start_time_.store(GetTimeSec(perf_freq_), std::memory_order_relaxed);
-            pause_offset_.store(0, std::memory_order_relaxed);
-            if (sync_) sync_->Seek();
-        }
-    }
+    // Live HLS: if stream stalled and new data arrived, restart pipeline
+    TryRestartLivePipeline();
 
     // Keep pipeline fed (network: keep at least 15 frames buffered)
     int video_fill_target = is_network_ ? VIDEO_FILL_NETWORK : VIDEO_FILL_LOCAL;
@@ -446,16 +472,12 @@ void Player::VideoTick() {
             callback_->RequestVideoRead();
     }
 
-    // Get audio clock — after audio EOF the ring-buffer clock estimate freezes
-    // (last_write_pts_ stays at the final sample while RingAvail drains to 0),
-    // so fall back to wall-clock elapsed time instead.
     double audio_clk = 0;
     if (has_audio_ && ao_ && callback_ && !callback_->IsAudioEof())
         audio_clk = ao_->GetClock();
     if (audio_clk <= 0.001)
         audio_clk = ElapsedSec();
 
-    // Find best frame to render using sync; copy directly to frame_buf_
     bool rendered = false;
 
     {
@@ -479,7 +501,6 @@ void Player::VideoTick() {
             if (sd.action == SyncAction::Wait) {
                 break;
             }
-            // SYNC_RENDER
             {
                 std::lock_guard<std::mutex> lock_f(frame_mutex_);
                 if (f->size > frame_buf_size_) {
@@ -508,7 +529,6 @@ void Player::VideoTick() {
         }
     }
 
-    // Render
     if (rendered && win_w_ > 0 && win_h_ > 0)
         if (!RenderD3D(win_w_, win_h_))
             LOG_WARN("RenderD3D: no frame rendered (vo_ uninitialized or no ready frame)");
@@ -547,33 +567,12 @@ bool Player::RenderD3D(int w, int h) {
 
 /*
  * CheckAudio — WM_TIMER handler (50 ms interval).
- *
- * 1. Live HLS restart: identical stall detection as VideoTick.
- * 2. Audio ring re-request: if buffered audio falls below threshold,
- *    request more samples from MF source reader.
- *    Threshold: 5× bitrate for network (5s buffer), bitrate/5 for local (200ms).
  */
 void Player::CheckAudio() {
     if (state_.load(std::memory_order_acquire) != PlayerState::Playing) return;
 
-    // Live HLS: if pipeline stalled and new data arrived, restart
-    if (source_ && source_->IsLive() &&
-        callback_ && (callback_->IsVideoEof() || callback_->IsAudioEof()) &&
-        source_->HlsByteStreamHasData() && source_->HasNewHlsData()) {
-        LOG_INFO("CheckAudio: Live HLS new data, flushing + restarting");
-        if (source_->GetReader()) {
-            IMFSourceReader* r = source_->GetReader();
-            r->Flush(source_->GetVideoStream());
-            r->Flush(source_->GetAudioStream());
-            callback_->ResetVideoEof();
-            callback_->ResetAudioEof();
-            start_time_.store(GetTimeSec(perf_freq_), std::memory_order_relaxed);
-            pause_offset_.store(0, std::memory_order_relaxed);
-            if (sync_) sync_->Seek();
-            callback_->RequestVideoRead();
-            callback_->RequestAudioRead();
-        }
-    }
+    // Live HLS: restart if stalled — deduplicated via TryRestartLivePipeline + atomic
+    TryRestartLivePipeline();
 
     if (has_audio_ && callback_ && !callback_->IsAudioEof()) {
         int buffered = ao_ ? ao_->GetBuffered() : 0;

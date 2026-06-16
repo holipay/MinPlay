@@ -62,6 +62,9 @@ public:
     void OnVideoFormatChanged();
 
 private:
+    void TryRestartLivePipeline();
+    void StartVideoTimer();
+    void StopVideoTimer();
     struct VFrame {
         uint8_t* data = nullptr;
         int size = 0;
@@ -92,6 +95,7 @@ private:
     std::atomic<double> start_time_{0};
     std::atomic<double> pause_offset_{0};
     std::atomic<double> pause_start_{0};
+    std::atomic<bool> live_restarting_{false};
 
     // Frame queue (producer: MF callback, consumer: main thread)
     // All accesses are under vq_mutex_ — plain int is sufficient

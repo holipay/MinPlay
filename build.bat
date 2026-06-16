@@ -27,7 +27,7 @@ cl %OPTFLAGS% /W4 /utf-8 /EHsc ^
     src\main.cpp src\core\player.cpp src\core\source_reader_callback.cpp ^
     src\media\media_source.cpp ^
     src\network\hls_stream.cpp ^
-    src\video_out\d3d11_video_output.cpp src\audio_out\wasapi_audio_output.cpp src\util\osd.cpp ^
+    src\video_out\d3d11_video_output.cpp src\audio_out\wasapi_audio_output.cpp src\util\osd.cpp src\util\yuv_convert.cpp ^
     src\sync\sync_context.cpp ^
     /Fe:MinPlay.exe ^
     /link user32.lib gdi32.lib ole32.lib oleaut32.lib shell32.lib ^

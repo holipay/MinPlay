@@ -13,6 +13,7 @@ add_executable(MinPlay
     src/video_out/d3d11_video_output.cpp
     src/audio_out/wasapi_audio_output.cpp
     src/util/osd.cpp
+    src/util/yuv_convert.cpp
     src/sync/sync_context.cpp
 )
 
@@ -54,21 +55,19 @@ if(BUILD_TESTS)
         tests/test_main.cpp
         tests/sync_test.cpp
         tests/hls_test.cpp
+        tests/player_test.cpp
+        tests/audio_test.cpp
         src/sync/sync_context.cpp
         src/network/hls_stream.cpp
+        src/util/yuv_convert.cpp
+        src/audio_out/wasapi_audio_output.cpp
     )
 
     target_include_directories(MinPlayTests PRIVATE src tests)
     target_link_libraries(MinPlayTests PRIVATE
         ole32
         oleaut32
-        winhttp
-        shlwapi
-        mf
-        mfplat
-        mfreadwrite
-        mfuuid
-        uuid
+        avrt
     )
 
     add_test(NAME MinPlayTests COMMAND MinPlayTests)

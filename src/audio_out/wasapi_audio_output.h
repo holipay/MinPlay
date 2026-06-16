@@ -75,6 +75,7 @@ private:
     std::atomic<int64_t> total_bytes_written_{0};
     std::atomic<double> last_write_pts_{0.0};
 
+    friend struct AudioTest;
     int RingAvail() const;
     int RingFree() const;
     void RingWrite(const uint8_t* data, int size);
