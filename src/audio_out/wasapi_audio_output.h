@@ -51,8 +51,8 @@ private:
 
     uint8_t* ring_ = nullptr;
     int ring_size_ = RING_SIZE;
-    volatile int ring_head_ = 0;
-    volatile int ring_tail_ = 0;
+    std::atomic<int> ring_head_{0};
+    std::atomic<int> ring_tail_{0};
 
     std::atomic<double> speed_{1.0};
     double resample_frac_ = 0.0;
@@ -60,7 +60,7 @@ private:
     uint8_t* tmp_buf_ = nullptr;
     int tmp_buf_size_ = 0;
 
-    volatile LONG64 total_bytes_written_ = 0;
+    std::atomic<int64_t> total_bytes_written_{0};
     double last_write_pts_ = 0.0;
     int last_write_size_ = 0;
 

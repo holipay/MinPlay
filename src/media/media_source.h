@@ -1,5 +1,6 @@
 #pragma once
 #include "../util/com_ptr.h"
+#include "../video_out/video_output.h"
 #include <windows.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -19,8 +20,6 @@ struct AudioInfo {
     int channels = 0;
     int bits_per_sample = 0;
 };
-
-enum class PixelFormat { Unknown = 0, RGB32, NV12, YUY2, I420 };
 
 class MediaSource {
 public:

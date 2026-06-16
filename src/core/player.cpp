@@ -494,7 +494,7 @@ void Player::RenderD3D(int w, int h) {
     std::lock_guard<std::mutex> lock(frame_mutex_);
     if (frame_ready_ && frame_buf_ && frame_w_ > 0 && frame_h_ > 0) {
         vo_->Resize(w, h);
-        vo_->Render(frame_buf_, frame_w_, frame_h_, frame_size_);
+        vo_->Render(frame_buf_, frame_w_, frame_h_, frame_size_, pix_fmt_);
         frame_ready_ = false;
     }
 }

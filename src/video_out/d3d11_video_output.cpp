@@ -218,17 +218,15 @@ void D3D11VideoOutput::UploadRGB32(const uint8_t* data, int w, int h) {
     ctx_->Unmap(tex_rgb_, 0);
 }
 
-void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int data_size) {
+void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int data_size, PixelFormat fmt) {
     if (!swap_ || !device_ || !data || src_w <= 0 || src_h <= 0) return;
     if (!rtv_) return;
     if (IsIconic(hwnd_)) return;
 
-    int is_nv12 = 0;
+    int is_nv12 = (fmt == PixelFormat::NV12) ? 1 : 0;
     int src_stride = src_w;
-    if (src_h > 0) {
-        int approx_stride = (int)((LONGLONG)data_size * 2 / (3 * src_h));
-        is_nv12 = (approx_stride >= src_w && approx_stride < src_w + 256);
-        if (is_nv12) src_stride = approx_stride;
+    if (is_nv12 && data_size > 0 && src_h > 0) {
+        src_stride = (int)((LONGLONG)data_size * 2 / (3 * src_h));
     }
 
     EnsureTextures(src_w, src_h, is_nv12);

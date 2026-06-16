@@ -22,7 +22,7 @@ public:
 
     bool Initialize(HWND hwnd, int w, int h);
 
-    void Render(const uint8_t* data, int src_w, int src_h, int data_size) override;
+    void Render(const uint8_t* data, int src_w, int src_h, int data_size, PixelFormat fmt) override;
     void Resize(int w, int h) override;
 
 private:

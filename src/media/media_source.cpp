@@ -81,14 +81,14 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     for (auto& f : fmts) {
         vmt->SetGUID(MF_MT_SUBTYPE, *f.fmt);
         hr = reader->SetCurrentMediaType(
-            MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, vmt.get());
+            (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, vmt.get());
         if (SUCCEEDED(hr)) {
             has_video_ = true;
             pix_fmt_ = f.pf;
 
             ComPtr<IMFMediaType> native;
             reader->GetCurrentMediaType(
-                MF_SOURCE_READER_FIRST_VIDEO_STREAM, &native);
+                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &native);
             UINT32 w = 0, h = 0, num = 0, den = 0;
             GetUint64Pair(native.get(), MF_MT_FRAME_SIZE, &w, &h);
             GetUint64Pair(native.get(), MF_MT_FRAME_RATE, &num, &den);
@@ -101,7 +101,7 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     }
     vmt.reset();
 
-    reader->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
+    reader->SetStreamSelection((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
 
     ComPtr<IMFMediaType> amt;
     MFCreateMediaType(&amt);
@@ -112,7 +112,7 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
 
     hr = reader->SetCurrentMediaType(
-        MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, amt.get());
+        (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, amt.get());
     amt.reset();
     if (SUCCEEDED(hr)) {
         has_audio_ = true;
@@ -125,9 +125,9 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     PROPVARIANT dur;
     PropVariantInit(&dur);
     hr = reader->GetPresentationAttribute(
-        MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &dur);
-    if (SUCCEEDED(hr) && (dur.vt == VT_I8 || dur.vt == VT_UI8))
-        duration_ = dur.hVal.QuadPart / 10000000.0;
+        (DWORD)MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &dur);
+    if (SUCCEEDED(hr) && dur.vt == VT_UI8)
+        duration_ = dur.uhVal.QuadPart / 10000000.0;
     PropVariantClear(&dur);
     LOG_INFO("Duration: %.1f s", duration_);
 
