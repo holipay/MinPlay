@@ -101,10 +101,6 @@ void Player::Close() {
 
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
-        for (int i = 0; i < VQ_SIZE; i++) {
-            free(vq_[i].data);
-            vq_[i].data = nullptr;
-        }
         vq_head_ = 0;
         vq_tail_ = 0;
     }
@@ -120,6 +116,10 @@ void Player::Close() {
 
 void Player::Destroy() {
     Close();
+    for (int i = 0; i < VQ_SIZE; i++) {
+        free(vq_[i].data);
+        vq_[i].data = nullptr;
+    }
     free(frame_buf_);
     frame_buf_ = nullptr;
 }
@@ -130,7 +130,7 @@ void Player::Play() {
     start_time_ = GetTimeSec(perf_freq_);
     pause_offset_ = 0;
 
-    InterlockedExchange(&video_first_frame_post_, 1);
+        video_first_frame_post_.store(1, std::memory_order_release);
     if (ao_) ao_->Resume();
     if (callback_) callback_->StartReading();
 }
@@ -168,10 +168,6 @@ void Player::Seek(double seconds) {
 
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
-        for (int i = 0; i < VQ_SIZE; i++) {
-            free(vq_[i].data);
-            vq_[i].data = nullptr;
-        }
         vq_head_ = 0;
         vq_tail_ = 0;
     }
@@ -187,7 +183,7 @@ void Player::Seek(double seconds) {
         state_ = PlayerState::Playing;
         start_time_ = GetTimeSec(perf_freq_) - seconds;
         pause_offset_ = 0;
-        InterlockedExchange(&video_first_frame_post_, 1);
+    video_first_frame_post_.store(1, std::memory_order_release);
         if (ao_) ao_->Resume();
         if (callback_) callback_->StartReading();
     }
@@ -303,14 +299,18 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         was_empty = (vq_head_ == vq_tail_);
         int next_tail = (vq_tail_ + 1) % VQ_SIZE;
         if (next_tail == vq_head_) {
+            // queue full — drop oldest frame (buffer stays for reuse)
             int old_head = vq_head_;
-            free(vq_[old_head].data);
-            vq_[old_head].data = nullptr;
+            vq_[old_head].size = 0;
             vq_head_ = (old_head + 1) % VQ_SIZE;
             if (callback_) callback_->ConsumeVideo();
         }
         VFrame* f = &vq_[vq_tail_];
-        f->data = (uint8_t*)malloc(frame_size);
+        // Reuse existing buffer if large enough; else realloc (rare: resolution change)
+        if (!f->data || f->size < frame_size) {
+            free(f->data);
+            f->data = (uint8_t*)malloc(frame_size);
+        }
         memcpy(f->data, frame_data, frame_size);
         f->size = frame_size;
         f->timestamp = timestamp / 10000000.0;
@@ -321,7 +321,7 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     free(converted);
     buf->Unlock();
 
-    if (was_empty && InterlockedExchange(&video_first_frame_post_, 0))
+    if (was_empty && video_first_frame_post_.exchange(0, std::memory_order_acq_rel))
         PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
 }
 
@@ -388,7 +388,7 @@ void Player::VideoTick() {
             bool has_more = (next != tail);
 
             if (sd.action == SyncAction::Drop && has_more) {
-                free(f->data); f->data = nullptr;
+                f->size = 0;
                 vq_head_ = next;
                 callback_->ConsumeVideo();
                 continue;
@@ -407,7 +407,7 @@ void Player::VideoTick() {
                         pix_fmt_ = f->pix_fmt;
                 }
             }
-            free(f->data); f->data = nullptr;
+            f->size = 0;
             vq_head_ = next;
             callback_->ConsumeVideo();
             rendered = true;

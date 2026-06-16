@@ -10,6 +10,7 @@
 #include <mfapi.h>
 #include <cstdint>
 #include <mutex>
+#include <atomic>
 
 #define TIMER_AUDIO_CHECK   1
 #define TIMER_VIDEO_DISPLAY 2
@@ -55,17 +56,6 @@ private:
         int size = 0;
         double timestamp = 0;
         PixelFormat pix_fmt = PixelFormat::Unknown;
-        ~VFrame() { free(data); }
-        VFrame() = default;
-        VFrame(const VFrame&) = delete;
-        VFrame& operator=(const VFrame&) = delete;
-        VFrame(VFrame&& other) noexcept : data(other.data), size(other.size),
-            timestamp(other.timestamp), pix_fmt(other.pix_fmt) { other.data = nullptr; }
-        VFrame& operator=(VFrame&& other) noexcept {
-            if (this != &other) { free(data); data = other.data; size = other.size;
-                timestamp = other.timestamp; pix_fmt = other.pix_fmt; other.data = nullptr; }
-            return *this;
-        }
     };
 
     static constexpr int VQ_SIZE = 32;
@@ -88,8 +78,8 @@ private:
 
     LARGE_INTEGER perf_freq_{};
     double start_time_ = 0;
-    volatile double pause_offset_ = 0;
-    volatile double pause_start_ = 0;
+    double pause_offset_ = 0;
+    double pause_start_ = 0;
 
     // Frame queue (producer: MF callback, consumer: main thread)
     VFrame vq_[VQ_SIZE];
@@ -101,13 +91,15 @@ private:
     std::mutex frame_mutex_;
     uint8_t* frame_buf_ = nullptr;
     int frame_buf_size_ = 0;
-    volatile bool frame_ready_ = false;
+    bool frame_ready_ = false;
     int frame_w_ = 0;
     int frame_h_ = 0;
     int frame_size_ = 0;
     PixelFormat pix_fmt_ = PixelFormat::Unknown;
 
-    volatile LONG video_first_frame_post_ = 0;
+
+
+    std::atomic<LONG> video_first_frame_post_{0};
 
     int win_w_ = 0;
     int win_h_ = 0;

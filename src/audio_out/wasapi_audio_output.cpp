@@ -326,7 +326,7 @@ double WasapiAudioOutput::GetClock() {
     UINT64 pos = 0;
     if (FAILED(clock_->GetPosition(&pos, nullptr)))
         return 0;
-    return (double)pos / bytes_per_sec_;
+    return (double)pos / out_rate_;
 }
 
 int WasapiAudioOutput::GetBuffered() { return RingAvail(); }

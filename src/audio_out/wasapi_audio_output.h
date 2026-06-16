@@ -4,6 +4,7 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <cstdint>
+#include <atomic>
 
 class WasapiAudioOutput : public AudioOutput {
 public:
@@ -26,14 +27,14 @@ public:
     void Reset() override;
 
 private:
-    static constexpr int RING_SIZE = 1024 * 1024;
+    static constexpr int RING_SIZE = 4 * 1024 * 1024;
 
     IAudioClient* client_ = nullptr;
     IAudioRenderClient* render_ = nullptr;
     IAudioClock* clock_ = nullptr;
     HANDLE event_ = nullptr;
     HANDLE thread_ = nullptr;
-    volatile bool playing_ = false;
+    std::atomic<bool> playing_{false};
     bool exclusive_ = false;
 
     int in_rate_ = 0;

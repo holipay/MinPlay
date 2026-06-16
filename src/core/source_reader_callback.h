@@ -4,6 +4,7 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <atomic>
 
 class Player;
 
@@ -36,11 +37,11 @@ public:
     HRESULT RequestVideoRead();
     HRESULT RequestAudioRead();
 
-    bool IsVideoEof() const { return video_eof_; }
-    bool IsAudioEof() const { return audio_eof_; }
-    void ResetVideoEof() { video_eof_ = false; }
-    void ResetAudioEof() { audio_eof_ = false; }
-    void ConsumeVideo() { InterlockedDecrement(&video_pending_); }
+    bool IsVideoEof() const { return video_eof_.load(std::memory_order_acquire); }
+    bool IsAudioEof() const { return audio_eof_.load(std::memory_order_acquire); }
+    void ResetVideoEof() { video_eof_.store(false, std::memory_order_release); }
+    void ResetAudioEof() { audio_eof_.store(false, std::memory_order_release); }
+    void ConsumeVideo() { video_pending_.fetch_sub(1, std::memory_order_relaxed); }
 
 private:
     volatile LONG ref_count_ = 1;
@@ -52,8 +53,8 @@ private:
     Player* player_ = nullptr;
 
     CRITICAL_SECTION lock_;
-    volatile bool running_ = false;
-    volatile bool video_eof_ = false;
-    volatile bool audio_eof_ = false;
-    volatile LONG video_pending_ = 0;
+    std::atomic<bool> running_{false};
+    std::atomic<bool> video_eof_{false};
+    std::atomic<bool> audio_eof_{false};
+    std::atomic<LONG> video_pending_{0};
 };

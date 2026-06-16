@@ -6,6 +6,7 @@
 #include <vector>
 #include <deque>
 #include <cstdint>
+#include <atomic>
 
 struct HlsSegment {
     std::wstring url;
@@ -49,14 +50,19 @@ private:
 
     // Download thread
     HANDLE download_thread_ = nullptr;
-    volatile bool download_running_ = false;
-    volatile int next_segment_to_download_ = 0;
+    std::atomic<bool> download_running_{false};
+    std::atomic<int> next_segment_to_download_{0};
     HANDLE wake_event_ = nullptr;
+
+    struct SegmentData {
+        uint8_t* data = nullptr;
+        size_t size = 0;
+    };
 
     // Segment buffer (parallel to segments_)
     CRITICAL_SECTION seg_lock_;
-    std::vector<uint8_t*> segment_data_;  // raw TS data per segment
-    std::vector<size_t> segment_sizes_;
+    std::vector<SegmentData> segment_data_;
+    int consumed_up_to_ = 0;
 };
 
 class HlsByteStream : public IMFByteStream {
@@ -109,7 +115,7 @@ private:
     bool has_eos_marker_ = false;
 
     int64_t read_pos_ = 0;
-    volatile LONG needs_wake_ = 0;
+    std::atomic<LONG> needs_wake_{0};
 
     // Async read support (live streams: hold pending when no data)
     BYTE* async_buf_ = nullptr;

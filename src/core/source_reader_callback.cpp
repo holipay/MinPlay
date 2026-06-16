@@ -40,7 +40,7 @@ STDMETHODIMP SourceReaderCallback::OnEvent(DWORD /*dwStreamIndex*/, IMFMediaEven
 HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESULT hrStatus, DWORD dwStreamIndex,
                                  DWORD dwStreamFlags, LONGLONG llTimestamp, IMFSample* pSample) {
     // If stopped, discard everything (no processing, no re-request)
-    if (!self->running_) return S_OK;
+    if (!self->running_.load(std::memory_order_relaxed)) return S_OK;
 
     if (FAILED(hrStatus) || (dwStreamFlags & MF_SOURCE_READERF_ERROR)) {
         LOG_WARN("OnReadSample failed stream=%lu hr=0x%08lX flags=0x%08lX, retrying",
@@ -108,7 +108,7 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
             if (self->ao_->GetFree() > 256 * 1024)
                 self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
         } else if (dwStreamIndex == self->video_stream_) {
-            LONG vp = InterlockedIncrement(&self->video_pending_);
+            LONG vp = self->video_pending_.fetch_add(1, std::memory_order_relaxed) + 1;
             if (vp < 2)
                 self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
         }
@@ -143,10 +143,10 @@ HRESULT SourceReaderCallback::StartReading() {
     if (!reader_) return E_FAIL;
 
     EnterCriticalSection(&lock_);
-    running_ = true;
-    video_eof_ = false;
-    audio_eof_ = false;
-    video_pending_ = 0;
+    running_.store(true, std::memory_order_release);
+    video_eof_.store(false, std::memory_order_release);
+    audio_eof_.store(false, std::memory_order_release);
+    video_pending_.store(0, std::memory_order_relaxed);
     LeaveCriticalSection(&lock_);
 
     if (video_stream_ != (DWORD)-1) {
@@ -162,7 +162,7 @@ HRESULT SourceReaderCallback::StartReading() {
 
 HRESULT SourceReaderCallback::Stop() {
     EnterCriticalSection(&lock_);
-    running_ = false;
+    running_.store(false, std::memory_order_release);
     LeaveCriticalSection(&lock_);
     return S_OK;
 }
@@ -170,7 +170,7 @@ HRESULT SourceReaderCallback::Stop() {
 HRESULT SourceReaderCallback::RequestVideoRead() {
     if (!reader_ || video_stream_ == (DWORD)-1) return E_FAIL;
     EnterCriticalSection(&lock_);
-    bool ok = running_ && !video_eof_;
+    bool ok = running_.load(std::memory_order_relaxed) && !video_eof_.load(std::memory_order_relaxed);
     LeaveCriticalSection(&lock_);
     if (!ok) return E_FAIL;
     return reader_->ReadSample(video_stream_, 0, nullptr, nullptr, nullptr, nullptr);
@@ -179,7 +179,7 @@ HRESULT SourceReaderCallback::RequestVideoRead() {
 HRESULT SourceReaderCallback::RequestAudioRead() {
     if (!reader_ || audio_stream_ == (DWORD)-1) return E_FAIL;
     EnterCriticalSection(&lock_);
-    bool ok = running_ && !audio_eof_;
+    bool ok = running_.load(std::memory_order_relaxed) && !audio_eof_.load(std::memory_order_relaxed);
     LeaveCriticalSection(&lock_);
     if (!ok) return E_FAIL;
     return reader_->ReadSample(audio_stream_, 0, nullptr, nullptr, nullptr, nullptr);
