@@ -8,6 +8,12 @@
 
 SourceReaderCallback::SourceReaderCallback() {
     InitializeCriticalSection(&lock_);
+    idle_event_ = CreateEvent(nullptr, TRUE, TRUE, nullptr);
+}
+
+SourceReaderCallback::~SourceReaderCallback() {
+    DeleteCriticalSection(&lock_);
+    if (idle_event_) CloseHandle(idle_event_);
 }
 
 STDMETHODIMP SourceReaderCallback::QueryInterface(REFIID riid, void** ppvObject) {
@@ -28,7 +34,6 @@ STDMETHODIMP_(ULONG) SourceReaderCallback::AddRef() {
 STDMETHODIMP_(ULONG) SourceReaderCallback::Release() {
     LONG count = ref_count_.fetch_sub(1, std::memory_order_acq_rel) - 1;
     if (count == 0) {
-        DeleteCriticalSection(&lock_);
         delete this;
     }
     return (ULONG)count;
@@ -152,14 +157,16 @@ STDMETHODIMP SourceReaderCallback::OnReadSample(HRESULT hrStatus, DWORD dwStream
                                                   IMFSample* pSample) {
     AddRef();  // keep self alive — caller may Release while we're busy
     busy_.fetch_add(1, std::memory_order_acq_rel);
+    if (idle_event_) ResetEvent(idle_event_);
     HRESULT hr;
     __try {
         hr = OnReadSampleImpl(this, hrStatus, dwStreamIndex, dwStreamFlags, llTimestamp, pSample);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         LOG_ERROR("OnReadSample SEH: 0x%08lX", GetExceptionCode());
-        hr = S_OK;
+        hr = E_FAIL;
     }
-    busy_.fetch_sub(1, std::memory_order_release);
+    if (busy_.fetch_sub(1, std::memory_order_release) == 1 && idle_event_)
+        SetEvent(idle_event_);
     Release();
     return hr;
 }
@@ -201,13 +208,11 @@ HRESULT SourceReaderCallback::Stop() {
     running_.store(false, std::memory_order_release);
     LeaveCriticalSection(&lock_);
     // Wait for any in-flight OnReadSample to finish before caller deletes objects
-    int spin = 0;
-    while (busy_.load(std::memory_order_acquire) > 0 && spin < 10000) {
-        SwitchToThread();
-        spin++;
+    if (busy_.load(std::memory_order_acquire) > 0 && idle_event_) {
+        DWORD wr = WaitForSingleObject(idle_event_, 5000);
+        if (wr == WAIT_TIMEOUT)
+            LOG_WARN("Stop: OnReadSample still busy after 5s");
     }
-    if (busy_.load(std::memory_order_acquire) > 0)
-        LOG_WARN("Stop: OnReadSample still busy after 10000 spin-wait iterations");
     return S_OK;
 }
 

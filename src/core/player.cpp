@@ -12,12 +12,6 @@
 
 Player::Player() {
     QueryPerformanceFrequency(&perf_freq_);
-    frame_buf_size_ = 3840 * 2160 * 4;
-    frame_buf_ = (uint8_t*)malloc(frame_buf_size_);
-    if (!frame_buf_) {
-        LOG_CRITICAL("Out of memory: frame_buf_ (%d bytes)", frame_buf_size_);
-        frame_buf_size_ = 0;
-    }
 }
 
 Player::~Player() {
@@ -184,6 +178,9 @@ void Player::Close() {
     }
     free(frame_buf_);
     frame_buf_ = nullptr;
+    frame_buf_size_ = 0;
+    frame_size_ = 0;
+    pix_fmt_.store(PixelFormat::Unknown, std::memory_order_relaxed);
 }
 
 void Player::Play() {

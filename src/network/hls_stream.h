@@ -87,7 +87,7 @@ public:
     STDMETHODIMP Close() override;
 
     // Called by HlsManager
-    void AddSegment(const uint8_t* data, size_t size);
+    void AddSegment(std::vector<uint8_t> data);
     void SetEndOfStream();
     void Clear();
     void SetCacheData(bool cache) { cache_data_ = cache; }
@@ -99,8 +99,7 @@ private:
     CRITICAL_SECTION lock_;
 
     struct LoadedSeg {
-        uint8_t* data = nullptr;
-        size_t size = 0;
+        std::vector<uint8_t> data;
         int64_t offset = 0;
     };
     std::vector<LoadedSeg> segs_;

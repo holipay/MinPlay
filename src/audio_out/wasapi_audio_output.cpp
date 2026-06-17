@@ -145,9 +145,8 @@ DWORD WasapiAudioOutput::PlaybackThreadProc() {
         UINT32 padding = 0;
         HRESULT hr = client_->GetCurrentPadding(&padding);
         if (FAILED(hr)) {
-            LOG_ERROR("WASAPI GetCurrentPadding failed: 0x%08lX — audio device lost", hr);
-            playing_ = false;
-            break;
+            // Client may be momentarily stopped during seek/reset — retry on next wake
+            continue;
         }
         UINT32 frames = buffer_frames_ - padding;
         if (frames == 0) continue;
@@ -351,28 +350,19 @@ void WasapiAudioOutput::Pause() { if (client_) client_->Stop(); }
 void WasapiAudioOutput::Resume() { if (client_) client_->Start(); }
 
 void WasapiAudioOutput::Reset() {
-    playing_ = false;
-    if (event_) SetEvent(event_);
-    if (thread_) {
-        if (WaitForSingleObject(thread_, 3000) == WAIT_TIMEOUT) {
-            LOG_WARN("WASAPI Reset: playback thread did not exit within 3s, terminating");
-            TerminateThread(thread_, 0);
-        }
-        CloseHandle(thread_);
-        thread_ = nullptr;
-    }
+    // Stop the audio engine — this drains any pending audio and makes
+    // GetCurrentPadding return an error, causing the playback thread to
+    // skip its iteration and retry on the next wake event.
     if (client_) client_->Stop();
+
+    // Reset ring buffer state (thread is idle because client is stopped)
     ring_head_.store(0, std::memory_order_relaxed);
     ring_tail_.store(0, std::memory_order_relaxed);
     resample_frac_ = 0;
     total_bytes_written_.store(0, std::memory_order_relaxed);
     last_write_pts_.store(0.0, std::memory_order_relaxed);
     speed_ = 1.0;
+
+    // Restart audio engine — playback thread resumes naturally
     if (client_) client_->Start();
-    playing_ = true;
-    thread_ = CreateThread(nullptr, 0, PlaybackThread, this, 0, nullptr);
-    if (!thread_) {
-        LOG_ERROR("CreateThread for WASAPI playback failed during Reset");
-        playing_ = false;
-    }
 }

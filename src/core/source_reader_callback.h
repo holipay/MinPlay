@@ -11,7 +11,7 @@ class Player;
 class SourceReaderCallback : public IMFSourceReaderCallback {
 public:
     SourceReaderCallback();
-    virtual ~SourceReaderCallback() = default;
+    virtual ~SourceReaderCallback();
 
     // IUnknown
     STDMETHODIMP QueryInterface(REFIID riid, void** ppvObject) override;
@@ -59,4 +59,5 @@ private:
     std::atomic<bool> audio_eof_{false};
     std::atomic<LONG> video_pending_{0};
     std::atomic<LONG> busy_{0};
+    HANDLE idle_event_ = nullptr;  // signaled when busy_ == 0
 };
