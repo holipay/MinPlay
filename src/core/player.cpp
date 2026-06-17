@@ -441,14 +441,14 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
             vq_head_ = (old_head + 1) % VQ_SIZE;
             if (callback_) callback_->ConsumeVideo();
         }
+        bool consumed_in_drop = (next_tail == vq_head_);
         VFrame* f = &vq_[vq_tail_];
         if (!f->data || f->size < frame_size) {
             free(f->data);
             f->data = (uint8_t*)malloc(frame_size);
             if (!f->data) {
                 LOG_CRITICAL("Out of memory: ProcessVideoFrame frame buffer");
-                // ConsumeVideo already called above if queue was full (drop path)
-                // — don't call again, would underflow video_pending_
+                if (!consumed_in_drop && callback_) callback_->ConsumeVideo();
                 free(converted);
                 buf->Unlock();
                 return;

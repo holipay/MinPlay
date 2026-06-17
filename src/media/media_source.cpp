@@ -71,7 +71,10 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     }
 
     ComPtr<IMFMediaType> vmt;
-    MFCreateMediaType(&vmt);
+    if (FAILED(MFCreateMediaType(&vmt))) {
+        LOG_ERROR("MFCreateMediaType failed");
+        return false;
+    }
     vmt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
 
     struct { const GUID* fmt; PixelFormat pf; } fmts[] = {
@@ -111,7 +114,10 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     vmt.reset();
 
     ComPtr<IMFMediaType> amt;
-    MFCreateMediaType(&amt);
+    if (FAILED(MFCreateMediaType(&amt))) {
+        LOG_ERROR("MFCreateMediaType failed");
+        return false;
+    }
     amt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     amt->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
 

@@ -96,18 +96,26 @@ bool D3D11VideoOutput::Initialize(HWND hwnd, int w, int h) {
     ID3DBlob* psblob = nullptr;
     hr = CompileShader(PS_NV12_SRC, "ps_5_0", &psblob);
     if (SUCCEEDED(hr)) {
-        device_->CreatePixelShader(
+        hr = device_->CreatePixelShader(
             psblob->GetBufferPointer(), psblob->GetBufferSize(), nullptr, &ps_nv12_);
+        if (FAILED(hr)) LOG_WARN("CreatePixelShader NV12 failed: 0x%08lX", hr);
     }
     if (psblob) psblob->Release();
 
     psblob = nullptr;
     hr = CompileShader(PS_RGB_SRC, "ps_5_0", &psblob);
     if (SUCCEEDED(hr)) {
-        device_->CreatePixelShader(
+        hr = device_->CreatePixelShader(
             psblob->GetBufferPointer(), psblob->GetBufferSize(), nullptr, &ps_rgb_);
+        if (FAILED(hr)) LOG_WARN("CreatePixelShader RGB failed: 0x%08lX", hr);
     }
     if (psblob) psblob->Release();
+
+    if (!ps_nv12_ && !ps_rgb_) {
+        LOG_ERROR("Both pixel shaders failed to create");
+        ReleaseD3D11();
+        return false;
+    }
 
     D3D11_BUFFER_DESC bd = {sizeof(s_quad), D3D11_USAGE_DYNAMIC,
                             D3D11_BIND_VERTEX_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};

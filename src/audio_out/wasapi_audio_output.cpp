@@ -303,6 +303,11 @@ bool WasapiAudioOutput::Initialize(int sample_rate, int channels, int bits) {
     if (!tmp_buf_) {
         LOG_ERROR("malloc tmp_buf_ failed (%d)", tmp_buf_size_);
         client_->Stop();
+        render_->Release(); render_ = nullptr;
+        clock_->Release(); clock_ = nullptr;
+        client_->Release(); client_ = nullptr;
+        if (event_) { CloseHandle(event_); event_ = nullptr; }
+        free(ring_); ring_ = nullptr;
         playing_ = false;
         return false;
     }

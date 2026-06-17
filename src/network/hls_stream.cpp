@@ -215,7 +215,7 @@ STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
     if (pcbRead) *pcbRead = total_read;
     if (total_read > 0) return S_OK;
     // No data available but no EOS — brief yield to avoid MF tight loop
-    Sleep(1);
+    SwitchToThread(); // yield instead of sleeping
     return S_OK;
 }
 
@@ -488,9 +488,15 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
     out.clear();
     uint8_t buf[65536];
     DWORD bytes_read = 0;
+    const size_t MAX_DOWNLOAD_SIZE = 200 * 1024 * 1024;  // 200MB safety limit
     while (download_running_ &&
-           WinHttpReadData(hRequest, buf, sizeof(buf), &bytes_read) && bytes_read > 0)
+           WinHttpReadData(hRequest, buf, sizeof(buf), &bytes_read) && bytes_read > 0) {
+        if (out.size() + bytes_read > MAX_DOWNLOAD_SIZE) {
+            LOG_WARN("Download exceeds %zuMB limit, aborting", MAX_DOWNLOAD_SIZE / (1024*1024));
+            return false;
+        }
         out.insert(out.end(), buf, buf + bytes_read);
+    }
 
     if (!download_running_) return false;
     return true;
