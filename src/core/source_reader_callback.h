@@ -43,6 +43,7 @@ public:
     void ResetVideoEof() { video_eof_.store(false, std::memory_order_release); }
     void ResetAudioEof() { audio_eof_.store(false, std::memory_order_release); }
     void ConsumeVideo() { video_pending_.fetch_sub(1, std::memory_order_relaxed); }
+    LONG GetGeneration() const { return generation_.load(std::memory_order_acquire); }
 
 private:
     std::atomic<LONG> ref_count_{1};
@@ -60,4 +61,5 @@ private:
     std::atomic<LONG> video_pending_{0};
     std::atomic<LONG> busy_{0};
     HANDLE idle_event_ = nullptr;  // signaled when busy_ == 0
+    std::atomic<LONG> generation_{0};
 };

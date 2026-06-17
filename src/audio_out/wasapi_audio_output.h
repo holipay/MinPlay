@@ -74,6 +74,7 @@ private:
 
     std::atomic<int64_t> total_bytes_written_{0};
     std::atomic<double> last_write_pts_{0.0};
+    std::atomic<int64_t> dropped_frames_{0};
 
     friend struct AudioTest;
     int RingAvail() const;

@@ -85,6 +85,7 @@ private:
     int tex_w_ = 0;
     int tex_h_ = 0;
     int tex_is_nv12_ = 0;
+    bool was_iconic_ = false;
 
     static HRESULT CompileShader(const char* src, const char* target, ID3DBlob** blob);
     void ReleaseD3D11();

@@ -232,8 +232,22 @@ void D3D11VideoOutput::UploadRGB32(const uint8_t* data, int w, int h) {
 
 void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int stride, PixelFormat fmt) {
     if (!swap_ || !device_ || !data || src_w <= 0 || src_h <= 0) return;
+
+    if (IsIconic(hwnd_)) { was_iconic_ = true; return; }
+    if (was_iconic_) {
+        was_iconic_ = false;
+        // Swap chain backbuffer may have been recycled during minimize —
+        // force RTV rebuild on next resize call
+        if (rtv_) { rtv_->Release(); rtv_ = nullptr; }
+    }
+    if (!rtv_) {
+        ID3D11Texture2D* buf = nullptr;
+        if (SUCCEEDED(swap_->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&buf))) {
+            device_->CreateRenderTargetView(buf, nullptr, &rtv_);
+            buf->Release();
+        }
+    }
     if (!rtv_) return;
-    if (IsIconic(hwnd_)) return;
 
     int is_nv12 = (fmt == PixelFormat::NV12) ? 1 : 0;
     int src_stride = (stride > 0) ? stride : src_w;
@@ -310,7 +324,8 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
 void D3D11VideoOutput::Resize(int w, int h) {
     if (!swap_) return;
     if (w <= 0 || h <= 0) return;
-    if (win_w_ == w && win_h_ == h) return;
+    if (win_w_ == w && win_h_ == h && !was_iconic_) return;
+    was_iconic_ = false;
 
     HRESULT hr = swap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {

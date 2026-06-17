@@ -402,11 +402,11 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     if (vq_fmt == PixelFormat::YUY2 && fw > 0 && fh > 0) {
         converted = ConvertYUY2ToNV12(data, fw, fh);
         if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; fs = fw; frame_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX); }
-        else { buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
+        else { LOG_WARN("YUY2→NV12 OOM for %dx%d", fw, fh); buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
     } else if (vq_fmt == PixelFormat::I420 && fw > 0 && fh > 0) {
         converted = ConvertI420ToNV12(data, fw, fh);
         if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; fs = fw; frame_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX); }
-        else { buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
+        else { LOG_WARN("I420→NV12 OOM for %dx%d", fw, fh); buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
     }
 
     bool was_empty;
@@ -506,7 +506,9 @@ void Player::VideoTick() {
                         frame_buf_ = nb;
                         frame_buf_size_ = f->size;
                     } else {
-                        LOG_WARN("Frame too large: %d > %d", f->size, frame_buf_size_);
+                        LOG_WARN("OOM realloc frame_buf_: %d bytes", f->size);
+                        // Leave frame in queue — retry next tick
+                        break;
                     }
                 }
                 if (frame_buf_ && f->size <= frame_buf_size_) {

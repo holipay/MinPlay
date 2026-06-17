@@ -54,6 +54,11 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
     // If stopped, discard everything (no processing, no re-request)
     if (!self->running_.load(std::memory_order_acquire)) return S_OK;
 
+    // Sample generation: capture at entry and check before re-request to
+    // discard stale samples arriving after Flush+RequestRead (HLS live switch).
+    LONG gen = self->generation_.load(std::memory_order_acquire);
+    (void)gen;
+
     if (FAILED(hrStatus) || (dwStreamFlags & MF_SOURCE_READERF_ERROR)) {
         LOG_WARN("OnReadSample failed stream=%lu hr=0x%08lX flags=0x%08lX",
                  dwStreamIndex, hrStatus, dwStreamFlags);
@@ -115,6 +120,9 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
     if (pSample) {
         if (dwStreamIndex == self->audio_stream_) {
             CHECK_AO("audio sample");
+            // Discard stale audio samples from before Flush/Seek
+            if (gen != self->generation_.load(std::memory_order_acquire))
+                return S_OK;
             ComPtr<IMFMediaBuffer> buf;
             if (SUCCEEDED(pSample->ConvertToContiguousBuffer(&buf))) {
                 BYTE* data = nullptr;
@@ -127,6 +135,9 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
             }
         } else if (dwStreamIndex == self->video_stream_) {
             CHECK_PLAYER("video sample");
+            // Discard stale video frames from before Flush/Seek
+            if (gen != self->generation_.load(std::memory_order_acquire))
+                return S_OK;
             self->player_->ProcessVideoFrame(pSample, llTimestamp);
         }
     }
@@ -206,6 +217,7 @@ HRESULT SourceReaderCallback::StartReading() {
 HRESULT SourceReaderCallback::Stop() {
     EnterCriticalSection(&lock_);
     running_.store(false, std::memory_order_release);
+    generation_.fetch_add(1, std::memory_order_release);
     LeaveCriticalSection(&lock_);
     // Wait for any in-flight OnReadSample to finish before caller deletes objects
     if (busy_.load(std::memory_order_acquire) > 0 && idle_event_) {

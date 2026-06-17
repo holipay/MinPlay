@@ -136,11 +136,18 @@ void WasapiAudioOutput::FillBuffer(BYTE* out, int out_frames) {
 
 DWORD WasapiAudioOutput::PlaybackThreadProc() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    int drop_warn_interval = 0;
 
     while (playing_) {
         DWORD wr = WaitForSingleObject(event_, 200);
         if (!playing_) break;
         if (wr != WAIT_OBJECT_0) continue;
+
+        // Periodic warning for ring buffer overflow
+        int64_t df = dropped_frames_.load(std::memory_order_relaxed);
+        if (df > 0 && (++drop_warn_interval % 50) == 0) {
+            LOG_WARN("Audio ring overflow: %lld bytes dropped (buffer full)", df);
+        }
 
         UINT32 padding = 0;
         HRESULT hr = client_->GetCurrentPadding(&padding);
@@ -319,6 +326,8 @@ void WasapiAudioOutput::Write(const uint8_t* data, int size) {
     if (!ring_) return;
     int avail = RingFree();
     int to_write = size < avail ? size : avail;
+    if (to_write < size)
+        dropped_frames_.fetch_add(size - to_write, std::memory_order_relaxed);
     to_write -= to_write % in_frame_bytes_;
     if (to_write > 0) {
         RingWrite(data, to_write);
