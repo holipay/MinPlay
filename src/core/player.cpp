@@ -26,6 +26,7 @@ double Player::GetTimeSec(const LARGE_INTEGER& freq) {
 
 double Player::ElapsedSec() const {
     double now = GetTimeSec(perf_freq_);
+    // Snapshot all three atomics once for consistency (all set from main thread)
     double ps = pause_start_.load(std::memory_order_acquire);
     double st = start_time_.load(std::memory_order_acquire);
     double po = pause_offset_.load(std::memory_order_acquire);
@@ -324,7 +325,15 @@ bool Player::IsFinished() const {
     }
     bool vdone  = !has_video_ || (callback_ && callback_->IsVideoEof() && vq_empty && !f_ready);
     bool adone  = !has_audio_ || (callback_ && callback_->IsAudioEof() && ao_ && ao_->GetBuffered() == 0);
-    return vdone && adone;
+    if (vdone && adone) {
+        // Debounce: require two consecutive true checks to avoid closing
+        // before the last rendered frame has been on screen for one frame
+        // interval (timer is 500ms, so this adds at most 500ms).
+        if (++finished_debounce_ >= 2) return true;
+    } else {
+        finished_debounce_ = 0;
+    }
+    return false;
 }
 
 uint8_t* Player::ConvertYUY2ToNV12(const uint8_t* yuy2, int w, int h) {

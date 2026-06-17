@@ -88,6 +88,7 @@ void WasapiAudioOutput::FillBuffer(BYTE* out, int out_frames) {
             int consume = avail - (avail % in_fb);
             ring_tail_.store((ring_tail_.load(std::memory_order_relaxed) + consume) % ring_size_, std::memory_order_release);
         }
+        resample_frac_ = 0;
         if (out_frames > 0)
             memset(out_f, 0, out_frames * out_ch * sizeof(float));
         return;
@@ -116,9 +117,19 @@ void WasapiAudioOutput::FillBuffer(BYTE* out, int out_frames) {
 
         for (int ch = 0; ch < out_ch; ch++) {
             int ic = ch < in_ch ? ch : 0;
-            float s0 = ReadSample(tmp + idx * in_fb + ic * (in_bits_ / 8), in_bits_);
-            float s1 = ReadSample(tmp + (idx + 1) * in_fb + ic * (in_bits_ / 8), in_bits_);
-            out_f[written * out_ch + ch] = s0 + (s1 - s0) * (float)frac;
+            const uint8_t* base = tmp + (idx * in_fb) + ic * (in_bits_ / 8);
+            float s0 = ReadSample(base, in_bits_);
+            float s1 = ReadSample(base + in_fb, in_bits_);
+            float sm1 = (idx > 0) ? ReadSample(base - in_fb, in_bits_) : s0;
+            float s2  = (idx < in_needed - 2) ? ReadSample(base + in_fb * 2, in_bits_) : s1;
+            float ft = (float)frac;
+            float t2 = ft * ft;
+            float t3 = t2 * ft;
+            out_f[written * out_ch + ch] =
+                (-0.5f * sm1 + 1.5f * s0 - 1.5f * s1 + 0.5f * s2) * t3
+              + (sm1 - 2.5f * s0 + 2.0f * s1 - 0.5f * s2) * t2
+              + (-0.5f * sm1 + 0.5f * s1) * ft
+              + s0;
         }
         pos += ratio;
         written++;
@@ -326,9 +337,11 @@ void WasapiAudioOutput::Write(const uint8_t* data, int size) {
     if (!ring_) return;
     int avail = RingFree();
     int to_write = size < avail ? size : avail;
-    if (to_write < size)
-        dropped_frames_.fetch_add(size - to_write, std::memory_order_relaxed);
-    to_write -= to_write % in_frame_bytes_;
+    int align_loss = to_write % in_frame_bytes_;
+    to_write -= align_loss;
+    int dropped = size - to_write;
+    if (dropped > 0)
+        dropped_frames_.fetch_add(dropped, std::memory_order_relaxed);
     if (to_write > 0) {
         RingWrite(data, to_write);
         total_bytes_written_.fetch_add(to_write, std::memory_order_relaxed);
@@ -369,6 +382,7 @@ void WasapiAudioOutput::Reset() {
     ring_tail_.store(0, std::memory_order_relaxed);
     resample_frac_ = 0;
     total_bytes_written_.store(0, std::memory_order_relaxed);
+    dropped_frames_.store(0, std::memory_order_relaxed);
     last_write_pts_.store(0.0, std::memory_order_relaxed);
     speed_ = 1.0;
 

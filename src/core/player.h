@@ -119,6 +119,7 @@ private:
 
     std::atomic<LONG> video_first_frame_post_{0};
 
+    mutable int finished_debounce_ = 0;
     int win_w_ = 0;
     int win_h_ = 0;
 
