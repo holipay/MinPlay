@@ -14,4 +14,5 @@ public:
     virtual void Pause() = 0;
     virtual void Resume() = 0;
     virtual void Reset() = 0;
+    virtual int GetBytesPerSec() const = 0;
 };

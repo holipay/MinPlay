@@ -355,24 +355,24 @@ int WasapiAudioOutput::Write(const uint8_t* data, int size) {
 }
 
 double WasapiAudioOutput::GetClock() {
-    // Hardware clock: sample position from audio device
-    if (clock_) {
-        UINT64 pos = 0;
-        if (SUCCEEDED(clock_->GetPosition(&pos, nullptr))) {
-            double hw_sec = (double)pos / out_rate_;
-            // Compensate WASAPI buffer latency: GetPosition() reports what has
-            // been written to the endpoint, but sound hasn't reached speakers yet.
-            double latency = (double)buffer_frames_ / out_rate_;
-            double clk = hw_sec - latency;
-            return clk > 0 ? clk : 0;
-        }
-    }
-    // Fallback: PTS estimate minus buffered duration (large buffers skew this)
+    // PTS-based clock: PTS of last written sample minus buffered duration.
+    // This is the primary clock because IAudioClock starts counting from
+    // client_->Start() (called during Initialize), which can be seconds before
+    // any actual audio data arrives — causing the hardware clock to report
+    // a position ahead of the media timeline.
     double pts = last_write_pts_.load(std::memory_order_acquire);
     if (pts > 0 && in_rate_ > 0 && in_frame_bytes_ > 0) {
         double buffered_sec = (double)RingAvail() / (double)(in_rate_ * in_frame_bytes_);
         double clk = pts - buffered_sec;
         return clk > 0 ? clk : 0;
+    }
+    // Fallback: WASAPI hardware clock.
+    // GetPosition returns consumed (played) frames — no latency compensation needed.
+    if (clock_) {
+        UINT64 pos = 0;
+        if (SUCCEEDED(clock_->GetPosition(&pos, nullptr))) {
+            return (double)pos / out_rate_;
+        }
     }
     return 0;
 }
