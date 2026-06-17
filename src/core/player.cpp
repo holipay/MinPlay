@@ -447,7 +447,8 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
             f->data = (uint8_t*)malloc(frame_size);
             if (!f->data) {
                 LOG_CRITICAL("Out of memory: ProcessVideoFrame frame buffer");
-                if (callback_) callback_->ConsumeVideo();
+                // ConsumeVideo already called above if queue was full (drop path)
+                // — don't call again, would underflow video_pending_
                 free(converted);
                 buf->Unlock();
                 return;
@@ -456,6 +457,8 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         memcpy(f->data, frame_data, frame_size);
         f->size = frame_size;
         f->stride = fs;
+        f->width = fw;
+        f->height = fh;
         f->timestamp = timestamp / 10000000.0;
         f->pix_fmt = vq_fmt;
         vq_tail_ = next_tail;
@@ -536,7 +539,10 @@ void Player::VideoTick() {
                     memcpy(frame_buf_, f->data, f->size);
                     frame_ready_ = true;
                     frame_size_ = f->size;
-                    stride_ = f->stride;
+                    frame_stride_ = f->stride;
+                    frame_render_w_ = f->width;
+                    frame_render_h_ = f->height;
+                    frame_pix_fmt_ = f->pix_fmt;
                     if (f->pix_fmt != PixelFormat::Unknown)
                         pix_fmt_ = f->pix_fmt;
                 }
@@ -575,11 +581,11 @@ void Player::OnVideoFormatChanged() {
 bool Player::RenderD3D(int w, int h) {
     if (!vo_) return false;
     std::lock_guard<std::mutex> lock(frame_mutex_);
-    if (frame_ready_ && frame_buf_ && frame_w_ > 0 && frame_h_ > 0) {
+    if (frame_ready_ && frame_buf_ && frame_render_w_ > 0 && frame_render_h_ > 0) {
         vo_->Resize(w, h);
-        int stride = stride_.load(std::memory_order_relaxed);
-        if (stride <= 0) stride = (int)frame_w_;
-        vo_->Render(frame_buf_, frame_w_, frame_h_, stride, pix_fmt_);
+        int stride = frame_stride_;
+        if (stride <= 0) stride = frame_render_w_;
+        vo_->Render(frame_buf_, frame_render_w_, frame_render_h_, stride, frame_pix_fmt_);
         frame_ready_ = false;
         return true;
     }

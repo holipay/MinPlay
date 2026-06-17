@@ -95,7 +95,10 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
         if (dwStreamIndex == self->video_stream_) {
             // Re-set our preferred output format
             ComPtr<IMFMediaType> mt;
-            MFCreateMediaType(&mt);
+            if (FAILED(MFCreateMediaType(&mt)) || !mt) {
+                LOG_ERROR("MFCreateMediaType failed in type change handler");
+                return S_OK;
+            }
             mt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
             struct { const GUID* fmt; } fmts[] = {
                 { &MFVideoFormat_NV12 }, { &MFVideoFormat_I420 },
@@ -111,8 +114,9 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
         }
     }
 
-    if (dwStreamFlags & (MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED |
-                         MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED)) {
+    if ((dwStreamFlags & (MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED |
+                           MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED)) &&
+        dwStreamIndex == self->video_stream_) {
         CHECK_PLAYER("format changed");
         self->player_->OnVideoFormatChanged();
     }

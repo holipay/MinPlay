@@ -71,6 +71,8 @@ private:
         uint8_t* data = nullptr;
         int size = 0;
         int stride = 0;
+        int width = 0;
+        int height = 0;
         double timestamp = 0;
         PixelFormat pix_fmt = PixelFormat::Unknown;
     };
@@ -106,15 +108,19 @@ private:
     int vq_tail_ = 0;
     mutable std::mutex vq_mutex_;
 
-    // Render frame buffer
+    // Render frame buffer (protected by frame_mutex_)
     mutable std::mutex frame_mutex_;
     uint8_t* frame_buf_ = nullptr;
     int frame_buf_size_ = 0;
-    std::atomic<bool> frame_ready_{false};
+    bool frame_ready_ = false;
+    int frame_render_w_ = 0;
+    int frame_render_h_ = 0;
+    int frame_size_ = 0;
+    int frame_stride_ = 0;
+    PixelFormat frame_pix_fmt_ = PixelFormat::Unknown;
     std::atomic<int> frame_w_{0};
     std::atomic<int> frame_h_{0};
     std::atomic<int> stride_{0};
-    int frame_size_ = 0;
     std::atomic<PixelFormat> pix_fmt_{PixelFormat::Unknown};
 
 

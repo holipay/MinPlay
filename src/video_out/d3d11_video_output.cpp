@@ -30,6 +30,7 @@ void D3D11VideoOutput::ReleaseD3D11() {
     REL(ps_nv12_); REL(vs_); REL(rtv_);
     REL(swap_); REL(ctx_); REL(device_);
     #undef REL
+    tex_w_ = tex_h_ = tex_is_nv12_ = 0;
 }
 
 bool D3D11VideoOutput::Initialize(HWND hwnd, int w, int h) {
