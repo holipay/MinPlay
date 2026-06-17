@@ -15,4 +15,5 @@ public:
     virtual void Resume() = 0;
     virtual void Reset() = 0;
     virtual int GetBytesPerSec() const = 0;
+    virtual int GetInputByteRate() const = 0;
 };

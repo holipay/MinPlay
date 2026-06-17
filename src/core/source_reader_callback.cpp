@@ -136,11 +136,13 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
                         int size = (int)(std::min)(cur_len, (DWORD)INT_MAX);
                         double pts_sec = llTimestamp / 10000000.0;
                         int written = self->ao_->Write(data, size);
-                        // Adjust PTS for partial writes to prevent clock jumps
-                        if (written < size) {
-                            int bps = self->ao_->GetBytesPerSec();
-                            if (bps > 0)
-                                pts_sec -= (double)(size - written) / bps;
+                        // Head PTS: sample start + duration of written data in ring.
+                        // last_write_pts_ must track the ring HEAD (newest data) so
+                        // GetClock can correctly compute: head_pts - RingAvail / byte_rate.
+                        if (written > 0) {
+                            int in_bps = self->ao_->GetInputByteRate();
+                            if (in_bps > 0)
+                                pts_sec += (double)written / in_bps;
                         }
                         self->ao_->SetPts(pts_sec);
                     }

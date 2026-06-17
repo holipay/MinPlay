@@ -701,23 +701,22 @@ bool HlsManager::Open(const wchar_t* url) {
     }
     byte_stream_->SetCacheData(!is_live_);  // VOD: keep data for seek-back
 
-    // Pre-buffer first 3 segments
-    int prebuffer = (std::min)(3, (int)segments_.size());
-    for (int i = 0; i < prebuffer; i++) {
+    // Synchronous pre-buffer: download first 3 segments so MF can probe TS
+    // container format from the byte stream before source reader creation.
+    int prebuf_count = (std::min)(3, (int)segments_.size());
+    for (int i = 0; i < prebuf_count; i++) {
         std::vector<uint8_t> seg_data;
-        LOG_INFO("HLS: Pre-buffering segment %d/%d", i + 1, (int)segments_.size());
         if (!DownloadUrl(segments_[i].url.c_str(), seg_data)) {
-            LOG_ERROR("HLS: Failed to download segment %d", i);
+            LOG_WARN("HLS: Pre-buffer segment %d failed", i);
             continue;
         }
-        size_t sz = seg_data.size();
-        LOG_INFO("HLS: Segment %d: %zu bytes", i + 1, sz);
         byte_stream_->AddSegment(std::move(seg_data));
         consumed_up_to_.store(i + 1, std::memory_order_release);
+        next_segment_to_download_.store(i + 1, std::memory_order_release);
     }
 
     // Start background download thread for remaining segments
-    next_segment_to_download_ = prebuffer;
+    next_segment_to_download_ = prebuf_count;
     download_thread_ = CreateThread(nullptr, 0,
         [](LPVOID arg) -> DWORD {
             ((HlsManager*)arg)->DownloadLoop();
@@ -817,7 +816,6 @@ void HlsManager::ReloadPlaylist() {
  * hammering the server.
  *
  * Error handling: 3 retries per segment with 1s delay, then skip.
- * Pre-buffered segments (first 3 in Open) skip download.
  */
 void HlsManager::DownloadLoop() {
     int retry_count = 0;
@@ -884,9 +882,13 @@ void HlsManager::Close() {
     download_running_ = false;
     SetEvent(wake_event_);
     if (download_thread_) {
-        // INFINITE wait: download loop checks download_running_ between operations.
-        // WinHTTP built-in timeouts (up to ~30s worst case) bound the max wait.
-        WaitForSingleObject(download_thread_, INFINITE);
+        // Use timeout: if download thread is stuck in WinHTTP (up to ~30s),
+        // avoid blocking window teardown indefinitely.
+        DWORD wr = WaitForSingleObject(download_thread_, 10000);
+        if (wr == WAIT_TIMEOUT) {
+            LOG_WARN("HLS download thread did not exit in 10s, terminating");
+            TerminateThread(download_thread_, 0);
+        }
         CloseHandle(download_thread_);
         download_thread_ = nullptr;
     }

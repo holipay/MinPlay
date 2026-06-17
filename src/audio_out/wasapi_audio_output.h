@@ -18,6 +18,7 @@ public:
 
     int Write(const uint8_t* data, int size) override;
     int GetBytesPerSec() const { return bytes_per_sec_; }
+    int GetInputByteRate() const override { return in_rate_ * in_frame_bytes_; }
     void SetPts(double pts) override { last_write_pts_.store(pts, std::memory_order_relaxed); }
     double GetClock() override;
     int GetBuffered() override;

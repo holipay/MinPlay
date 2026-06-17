@@ -179,7 +179,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         MessageBoxA(nullptr, "Out of memory", "Error", MB_OK);
         return 1;
     }
-    if (!g_player->Open(g_hwnd, url)) {
+    SetWindowText(g_hwnd, TEXT("MinPlay - Loading..."));
+    bool open_ok = g_player->Open(g_hwnd, url);
+    SetWindowText(g_hwnd, TEXT("MinPlay"));
+    if (!open_ok) {
         // Open() already logs specifics; show generic error to user
         MessageBoxA(nullptr, "Failed to open media file.\nSee console for details.", "Error", MB_OK);
         delete g_player; g_player = nullptr;
