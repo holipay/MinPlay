@@ -11,11 +11,13 @@
 #include <cstdint>
 #include <mutex>
 #include <atomic>
+#include <thread>
 
 #define TIMER_AUDIO_CHECK   1
 #define TIMER_VIDEO_DISPLAY 2
 #define TIMER_EOF_CHECK     3
 #define WM_RESTART_LIVE     (WM_APP + 1)
+#define WM_OPEN_COMPLETE    (WM_APP + 2)
 
 // Audio buffering thresholds
 constexpr int AUDIO_BUFFER_NETWORK_MULT = 5;   // 5 × bitrate for network (5 s buffer)
@@ -29,7 +31,7 @@ constexpr int VIDEO_FILL_LOCAL   = 1;   // 1+ frame for local files
 constexpr double SYNC_WINDOW_DEFAULT   = 0.020;  // 20 ms tolerance
 constexpr double SYNC_WINDOW_EXCLUSIVE = 0.010;  // 10 ms for exclusive-mode WASAPI
 
-enum class PlayerState : int { Stopped, Playing, Paused };
+enum class PlayerState : int { Stopped, Opening, Playing, Paused };
 
 class Player {
 public:
@@ -63,7 +65,11 @@ public:
     void OnVideoFormatChanged();
     void FlushAndRestart();
 
+public:
+    bool IsOpenSuccessful() const { return open_ok_; }
+
 private:
+    void OpenAsync(std::wstring url);
     void TryRestartLivePipeline();
     void StartVideoTimer();
     void StopVideoTimer();
@@ -100,6 +106,11 @@ private:
     std::atomic<double> pause_offset_{0};
     std::atomic<double> pause_start_{0};
     std::atomic<bool> live_restarting_{false};
+
+    // Async open (background thread)
+    std::thread open_thread_;
+    std::atomic<bool> open_running_{false};
+    bool open_ok_ = false;
 
     // Frame queue (producer: MF callback, consumer: main thread)
     // All accesses are under vq_mutex_ — plain int is sufficient

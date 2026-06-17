@@ -9,6 +9,7 @@
 #include <cmath>
 #include <algorithm>
 #include <new>
+#include <thread>
 
 Player::Player() {
     QueryPerformanceFrequency(&perf_freq_);
@@ -52,7 +53,7 @@ void Player::StopVideoTimer() {
 }
 
 bool Player::Open(HWND hwnd, const wchar_t* url) {
-    Close();  // Release previous state to prevent leak on re-open
+    Close();
     hwnd_ = hwnd;
 
     callback_ = new (std::nothrow) SourceReaderCallback();
@@ -60,21 +61,41 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
         LOG_CRITICAL("Out of memory: callback_");
         return false;
     }
+    callback_->AddRef();
 
+    osd_ = new (std::nothrow) OSD();
+    if (!osd_)
+        LOG_WARN("Out of memory: osd_ (OSD overlay disabled)");
+
+    state_.store(PlayerState::Opening, std::memory_order_release);
+
+    open_running_ = true;
+    open_thread_ = std::thread([this, url_str = std::wstring(url)]() {
+        OpenAsync(url_str);
+    });
+    return true;
+}
+
+void Player::OpenAsync(std::wstring url) {
     source_ = new (std::nothrow) MediaSource();
     if (!source_) {
         LOG_CRITICAL("Out of memory: source_");
-        goto fail;
+        open_ok_ = false;
+        PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, 0);
+        return;
     }
-    if (!source_->Open(url, callback_)) {
+
+    if (!source_->Open(url.c_str(), callback_)) {
         LOG_ERROR("Failed to open media source");
-        goto fail;
+        open_ok_ = false;
+        PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, 0);
+        return;
     }
 
     has_video_ = source_->HasVideo();
     has_audio_ = source_->HasAudio();
-    is_network_ = (wcsncmp(url, L"http://", 7) == 0) ||
-                  (wcsncmp(url, L"https://", 8) == 0);
+    is_network_ = (wcsncmp(url.c_str(), L"http://", 7) == 0) ||
+                  (wcsncmp(url.c_str(), L"https://", 8) == 0);
     pix_fmt_ = source_->GetPixelFormat();
 
     if (has_video_) {
@@ -102,8 +123,17 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
         }
         if (!has_audio_ && !source_->HasVideo()) {
             LOG_WARN("Audio-only stream lost audio output — cannot play");
-            goto fail;
+            open_ok_ = false;
+            PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, 0);
+            return;
         }
+    }
+
+    {
+        RECT rc;
+        GetClientRect(hwnd_, &rc);
+        win_w_ = rc.right;
+        win_h_ = rc.bottom;
     }
 
     {
@@ -113,21 +143,16 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
         sync_ = new (std::nothrow) SyncContext(sync_window);
         if (!sync_) {
             LOG_CRITICAL("Out of memory: sync_");
-            goto fail;
+            open_ok_ = false;
+            PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, 0);
+            return;
         }
-    }
-
-    {
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        win_w_ = rc.right;
-        win_h_ = rc.bottom;
     }
 
     {
         D3D11VideoOutput* d3d_vo = new (std::nothrow) D3D11VideoOutput();
         if (d3d_vo) {
-            if (d3d_vo->Initialize(hwnd, win_w_, win_h_)) {
+            if (d3d_vo->Initialize(hwnd_, win_w_, win_h_)) {
                 vo_ = d3d_vo;
             } else {
                 LOG_ERROR("Failed to initialize D3D11 video output");
@@ -138,22 +163,23 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
         }
     }
 
-    osd_ = new (std::nothrow) OSD();
-    if (!osd_)
-        LOG_WARN("Out of memory: osd_ (OSD overlay disabled)");
-
     callback_->SetPlayer(this);
     callback_->SetReader(source_->GetReader(),
                           source_->GetVideoStream(),
                           source_->GetAudioStream());
-    return true;
 
-fail:
-    Close();
-    return false;
+    open_ok_ = true;
+    PostMessage(hwnd_, WM_OPEN_COMPLETE, 1, 0);
 }
 
 void Player::Close() {
+    // Signal async open thread to abort
+    open_running_ = false;
+
+    // Wait for background thread to finish before tearing down its objects
+    if (open_thread_.joinable())
+        open_thread_.join();
+
     // Kill timers first to prevent WM_TIMER callbacks during teardown
     StopVideoTimer();
     if (hwnd_) {
