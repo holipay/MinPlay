@@ -52,6 +52,7 @@ void Player::StopVideoTimer() {
 }
 
 bool Player::Open(HWND hwnd, const wchar_t* url) {
+    Close();  // Release previous state to prevent leak on re-open
     hwnd_ = hwnd;
 
     callback_ = new (std::nothrow) SourceReaderCallback();
@@ -63,14 +64,11 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
     source_ = new (std::nothrow) MediaSource();
     if (!source_) {
         LOG_CRITICAL("Out of memory: source_");
-        callback_->Release(); callback_ = nullptr;
-        return false;
+        goto fail;
     }
-    if (!source_->Open(url, static_cast<IMFSourceReaderCallback*>(callback_))) {
+    if (!source_->Open(url, callback_)) {
         LOG_ERROR("Failed to open media source");
-        delete source_; source_ = nullptr;
-        callback_->Release(); callback_ = nullptr;
-        return false;
+        goto fail;
     }
 
     has_video_ = source_->HasVideo();
@@ -89,55 +87,70 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
 
     if (has_audio_) {
         AudioInfo ai = source_->GetAudioInfo();
-        ao_ = new (std::nothrow) WasapiAudioOutput();
-        if (!ao_) {
+        WasapiAudioOutput* wasapi = new (std::nothrow) WasapiAudioOutput();
+        if (!wasapi) {
             LOG_CRITICAL("Out of memory: ao_");
             has_audio_ = false;
-        } else if (!static_cast<WasapiAudioOutput*>(ao_)->Initialize(
-                ai.sample_rate, ai.channels, ai.bits_per_sample)) {
+        } else if (!wasapi->Initialize(ai.sample_rate, ai.channels, ai.bits_per_sample)) {
             LOG_ERROR("Failed to initialize audio output");
-            delete ao_; ao_ = nullptr;
+            delete wasapi;
             has_audio_ = false;
         } else {
-            audio_bytes_per_sec_ = ai.sample_rate * ai.channels * (ai.bits_per_sample / 8);
+            ao_ = wasapi;
+            audio_bytes_per_sec_ = ai.sample_rate * ai.channels * ((ai.bits_per_sample + 7) / 8);
             callback_->SetAudioOutput(ao_);
+        }
+        if (!has_audio_ && !source_->HasVideo()) {
+            LOG_WARN("Audio-only stream lost audio output — cannot play");
+            goto fail;
         }
     }
 
-    double sync_window = SYNC_WINDOW_DEFAULT;
-    if (ao_ && ao_->IsExclusive())
-        sync_window = SYNC_WINDOW_EXCLUSIVE;
-    sync_ = new (std::nothrow) SyncContext(sync_window);
-    if (!sync_) {
-        LOG_CRITICAL("Out of memory: sync_");
-        return false;
+    {
+        double sync_window = SYNC_WINDOW_DEFAULT;
+        if (ao_ && ao_->IsExclusive())
+            sync_window = SYNC_WINDOW_EXCLUSIVE;
+        sync_ = new (std::nothrow) SyncContext(sync_window);
+        if (!sync_) {
+            LOG_CRITICAL("Out of memory: sync_");
+            goto fail;
+        }
     }
 
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    win_w_ = rc.right;
-    win_h_ = rc.bottom;
+    {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        win_w_ = rc.right;
+        win_h_ = rc.bottom;
+    }
 
-    delete vo_; vo_ = nullptr;
-    D3D11VideoOutput* d3d_vo = new (std::nothrow) D3D11VideoOutput();
-    if (!d3d_vo) {
-        LOG_CRITICAL("Out of memory: d3d_vo");
-    } else if (!d3d_vo->Initialize(hwnd, win_w_, win_h_)) {
-        LOG_ERROR("Failed to initialize D3D11 video output");
-        delete d3d_vo;
-    } else {
-        vo_ = d3d_vo;
+    {
+        D3D11VideoOutput* d3d_vo = new (std::nothrow) D3D11VideoOutput();
+        if (d3d_vo) {
+            if (d3d_vo->Initialize(hwnd, win_w_, win_h_)) {
+                vo_ = d3d_vo;
+            } else {
+                LOG_ERROR("Failed to initialize D3D11 video output");
+                delete d3d_vo;
+            }
+        } else {
+            LOG_CRITICAL("Out of memory: d3d_vo");
+        }
     }
 
     osd_ = new (std::nothrow) OSD();
     if (!osd_)
-        LOG_CRITICAL("Out of memory: osd_");
+        LOG_WARN("Out of memory: osd_ (OSD overlay disabled)");
 
     callback_->SetPlayer(this);
     callback_->SetReader(source_->GetReader(),
                           source_->GetVideoStream(),
                           source_->GetAudioStream());
     return true;
+
+fail:
+    Close();
+    return false;
 }
 
 void Player::Close() {
