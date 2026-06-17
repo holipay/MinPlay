@@ -361,21 +361,21 @@ void Player::TryRestartLivePipeline() {
 
 void Player::FlushAndRestart() {
     LOG_INFO("Live: new HLS data, flushing + restarting pipeline");
-    if (source_->GetReader()) {
-        IMFSourceReader* r = source_->GetReader();
-        r->Flush(source_->GetVideoStream());
-        r->Flush(source_->GetAudioStream());
-        callback_->ResetVideoEof();
-        callback_->ResetAudioEof();
-        // Reset clock so new frame timestamps (~0) match the wall clock
-        double now = GetTimeSec(perf_freq_);
-        start_time_.store(now, std::memory_order_release);
-        pause_offset_.store(0, std::memory_order_release);
-        pause_start_.store(0, std::memory_order_release);
-        if (sync_) sync_->Seek();
-        callback_->RequestVideoRead();
-        callback_->RequestAudioRead();
-    }
+    // Use Stop()+StartReading() instead of Flush() — Flush() is synchronous
+    // and deadlocks when the MF work thread also calls Flush() in the
+    // OnReadSample error path. Stop() waits for in-flight callbacks (5s max),
+    // increments generation_ to discard stale samples, then StartReading()
+    // re-requests fresh data from the byte stream.
+    callback_->Stop();
+    callback_->ResetVideoEof();
+    callback_->ResetAudioEof();
+    // Reset clock so new frame timestamps (~0) match the wall clock
+    double now = GetTimeSec(perf_freq_);
+    start_time_.store(now, std::memory_order_release);
+    pause_offset_.store(0, std::memory_order_release);
+    pause_start_.store(0, std::memory_order_release);
+    if (sync_) sync_->Seek();
+    callback_->StartReading();
 
     live_restarting_.store(false, std::memory_order_release);
 }

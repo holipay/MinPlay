@@ -226,6 +226,11 @@ STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCal
 
     LOG_INFO("HlsBS: BeginRead(%u) -> %lu bytes (eos=%d)", cb, bytesRead, is_eos);
 
+    // Yield CPU when no data available — prevents MF tight-loop during
+    // source reader creation if TS demuxer polls BeginRead rapidly.
+    if (bytesRead == 0 && !is_eos)
+        SwitchToThread();
+
     ComPtr<IMFAsyncResult> result;
     if (SUCCEEDED(MFCreateAsyncResult(nullptr, pCallback, pState, &result))) {
         return MFInvokeCallback(result.get());
@@ -626,7 +631,7 @@ bool HlsManager::Open(const wchar_t* url) {
 
     // Synchronous pre-buffer: download first 3 segments so MF can probe TS
     // container format from the byte stream before source reader creation.
-    int prebuf_count = (std::min)(3, (int)segments_.size());
+    int prebuf_count = (std::min)(1, (int)segments_.size());
     LOG_INFO("HLS: Pre-buffering %d segments...", prebuf_count);
     for (int i = 0; i < prebuf_count; i++) {
         std::vector<uint8_t> seg_data;
