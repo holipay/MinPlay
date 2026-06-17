@@ -333,8 +333,8 @@ WasapiAudioOutput::~WasapiAudioOutput() {
     free(tmp_buf_);
 }
 
-void WasapiAudioOutput::Write(const uint8_t* data, int size) {
-    if (!ring_) return;
+int WasapiAudioOutput::Write(const uint8_t* data, int size) {
+    if (!ring_) return 0;
     int avail = RingFree();
     int to_write = size < avail ? size : avail;
     int align_loss = to_write % in_frame_bytes_;
@@ -346,14 +346,21 @@ void WasapiAudioOutput::Write(const uint8_t* data, int size) {
         RingWrite(data, to_write);
         total_bytes_written_.fetch_add(to_write, std::memory_order_relaxed);
     }
+    return to_write;
 }
 
 double WasapiAudioOutput::GetClock() {
-    // Hardware clock: sample position from audio device — accurate regardless of buffer depth
+    // Hardware clock: sample position from audio device
     if (clock_) {
         UINT64 pos = 0;
-        if (SUCCEEDED(clock_->GetPosition(&pos, nullptr)))
-            return (double)pos / out_rate_;
+        if (SUCCEEDED(clock_->GetPosition(&pos, nullptr))) {
+            double hw_sec = (double)pos / out_rate_;
+            // Compensate WASAPI buffer latency: GetPosition() reports what has
+            // been written to the endpoint, but sound hasn't reached speakers yet.
+            double latency = (double)buffer_frames_ / out_rate_;
+            double clk = hw_sec - latency;
+            return clk > 0 ? clk : 0;
+        }
     }
     // Fallback: PTS estimate minus buffered duration (large buffers skew this)
     double pts = last_write_pts_.load(std::memory_order_acquire);

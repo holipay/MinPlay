@@ -132,8 +132,18 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
                 BYTE* data = nullptr;
                 DWORD max_len = 0, cur_len = 0;
                 if (SUCCEEDED(buf->Lock(&data, &max_len, &cur_len))) {
-                    self->ao_->SetPts(llTimestamp / 10000000.0);
-                    self->ao_->Write(data, (int)(std::min)(cur_len, (DWORD)INT_MAX));
+                    {
+                        int size = (int)(std::min)(cur_len, (DWORD)INT_MAX);
+                        double pts_sec = llTimestamp / 10000000.0;
+                        int written = self->ao_->Write(data, size);
+                        // Adjust PTS for partial writes to prevent clock jumps
+                        if (written < size) {
+                            int bps = self->ao_->GetBytesPerSec();
+                            if (bps > 0)
+                                pts_sec -= (double)(size - written) / bps;
+                        }
+                        self->ao_->SetPts(pts_sec);
+                    }
                     buf->Unlock();
                 }
             }

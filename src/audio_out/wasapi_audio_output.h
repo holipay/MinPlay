@@ -16,7 +16,8 @@ public:
 
     bool Initialize(int sample_rate, int channels, int bits);
 
-    void Write(const uint8_t* data, int size) override;
+    int Write(const uint8_t* data, int size) override;
+    int GetBytesPerSec() const { return bytes_per_sec_; }
     void SetPts(double pts) override { last_write_pts_.store(pts, std::memory_order_relaxed); }
     double GetClock() override;
     int GetBuffered() override;

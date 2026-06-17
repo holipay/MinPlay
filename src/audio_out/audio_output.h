@@ -5,7 +5,7 @@ class AudioOutput {
 public:
     virtual ~AudioOutput() = default;
 
-    virtual void Write(const uint8_t* data, int size) = 0;
+    virtual int Write(const uint8_t* data, int size) = 0;
     virtual void SetPts(double pts) = 0;
     virtual double GetClock() = 0;
     virtual int GetBuffered() = 0;
