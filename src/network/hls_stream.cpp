@@ -715,8 +715,10 @@ bool HlsManager::Open(const wchar_t* url) {
         next_segment_to_download_.store(i + 1, std::memory_order_release);
     }
 
-    // Start background download thread for remaining segments
-    next_segment_to_download_ = prebuf_count;
+    // Start background download thread for remaining segments.
+    // Use consumed_up_to_ (not prebuf_count) so that failed pre-buffer
+    // segments are re-attempted by the download loop.
+    next_segment_to_download_ = consumed_up_to_.load();
     download_thread_ = CreateThread(nullptr, 0,
         [](LPVOID arg) -> DWORD {
             ((HlsManager*)arg)->DownloadLoop();

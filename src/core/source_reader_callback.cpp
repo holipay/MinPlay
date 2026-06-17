@@ -143,8 +143,8 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
                             int in_bps = self->ao_->GetInputByteRate();
                             if (in_bps > 0)
                                 pts_sec += (double)written / in_bps;
+                            self->ao_->SetPts(pts_sec);
                         }
-                        self->ao_->SetPts(pts_sec);
                     }
                     buf->Unlock();
                 }
