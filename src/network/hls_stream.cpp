@@ -46,10 +46,11 @@ static std::wstring Utf8ToWide(const std::string& utf8) {
  *   - Read/seek operate over a sorted vector of LoadedSeg (segments appended
  *     by download thread via AddSegment). Binary search maps global offset
  *     to segment+offset.
- *   - Async reads (BeginRead/EndRead): if data is available, complete
- *     immediately via MFInvokeCallback. If not, queue a PendingRead and
- *     return E_PENDING — MF treats this as "retry later". When AddSegment
- *     arrives, FulfillPendingReads re-checks and completes any satisfied reads.
+ *   - Async reads (BeginRead/EndRead): always complete immediately via
+ *     MFInvokeCallback. Never return E_PENDING — MF's TS demuxer does not
+ *     handle pending reads during initial probing and would block forever.
+ *     For 0 bytes without EOS, use S_OK (not S_FALSE) so MF does not
+ *     prematurely signal end-of-stream during playback.
  *   - EOS protocol: Read() returns S_OK with 0 bytes when data is absent but
  *     EOS is not set (MF treats 0-bytes-S_OK as "try again"). Only returns
  *     S_FALSE when has_eos_marker_ is set AND position >= total_bytes_.
@@ -92,6 +93,7 @@ STDMETHODIMP HlsByteStream::GetCapabilities(DWORD* pdwCapabilities) {
     *pdwCapabilities = MFBYTESTREAM_IS_READABLE
                      | MFBYTESTREAM_IS_SEEKABLE
                      | MFBYTESTREAM_IS_PARTIALLY_DOWNLOADED;
+    LOG_INFO("HlsBS: GetCapabilities -> 0x%08lX", *pdwCapabilities);
     return S_OK;
 }
 
@@ -100,6 +102,7 @@ STDMETHODIMP HlsByteStream::GetLength(QWORD* pqwLength) {
     EnterCriticalSection(&lock_);
     *pqwLength = total_bytes_;
     LeaveCriticalSection(&lock_);
+    LOG_INFO("HlsBS: GetLength -> %llu", *pqwLength);
     return S_OK;
 }
 
@@ -112,34 +115,13 @@ STDMETHODIMP HlsByteStream::GetCurrentPosition(QWORD* pqwPosition) {
     EnterCriticalSection(&lock_);
     *pqwPosition = read_pos_;
     LeaveCriticalSection(&lock_);
+    LOG_INFO("HlsBS: GetCurrentPosition -> %lld", *pqwPosition);
     return S_OK;
 }
 
-void HlsByteStream::CancelPendingReadsLocked() {
-    std::vector<PendingRead> to_cancel;
-    to_cancel.swap(pending_reads_);
-
-    for (auto& pr : to_cancel) {
-        async_result_ = 0;
-        async_hr_ = E_ABORT;
-        LeaveCriticalSection(&lock_);
-
-        ComPtr<IMFAsyncResult> result;
-        if (SUCCEEDED(MFCreateAsyncResult(nullptr, pr.cb, pr.state, &result))) {
-            MFInvokeCallback(result.get());
-        } else {
-            LOG_ERROR("MFCreateAsyncResult failed in CancelPendingReadsLocked");
-        }
-        pr.cb->Release();
-        if (pr.state) pr.state->Release();
-
-        EnterCriticalSection(&lock_);
-    }
-}
-
 STDMETHODIMP HlsByteStream::SetCurrentPosition(QWORD qwPosition) {
+    LOG_INFO("HlsBS: SetCurrentPosition(%llu)", qwPosition);
     EnterCriticalSection(&lock_);
-    CancelPendingReadsLocked();
     read_pos_ = (int64_t)qwPosition;
     LeaveCriticalSection(&lock_);
     return S_OK;
@@ -149,7 +131,11 @@ STDMETHODIMP HlsByteStream::IsEndOfStream(BOOL* pfEndOfStream) {
     if (!pfEndOfStream) return E_POINTER;
     EnterCriticalSection(&lock_);
     *pfEndOfStream = (has_eos_marker_ && read_pos_ >= total_bytes_) ? TRUE : FALSE;
+    int64_t rp = read_pos_;
+    int64_t tb = total_bytes_;
     LeaveCriticalSection(&lock_);
+    LOG_INFO("HlsBS: IsEndOfStream -> %d (eos=%d pos=%lld total=%lld)",
+             *pfEndOfStream, has_eos_marker_, rp, tb);
     return S_OK;
 }
 
@@ -208,21 +194,25 @@ STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
     if (total_read == 0 && has_eos_marker_ && read_pos_ >= total_bytes_) {
         LeaveCriticalSection(&lock_);
         if (pcbRead) *pcbRead = 0;
+        LOG_INFO("HlsBS: Read(%u) -> S_FALSE (EOS)", cb);
         return S_FALSE;
     }
 
     LeaveCriticalSection(&lock_);
     if (pcbRead) *pcbRead = total_read;
+    LOG_INFO("HlsBS: Read(%u) -> %lu bytes, S_OK", cb, total_read);
     if (total_read > 0) return S_OK;
     // No data available but no EOS — brief yield to avoid MF tight loop
     SwitchToThread(); // yield instead of sleeping
     return S_OK;
 }
 
-/* Async read: if data (or EOS) available, complete immediately on this thread.
- * Otherwise queue as PENDING — FulfillPendingReads() will satisfy it when
- * AddSegment delivers new data. MF serializes BeginRead calls (only one
- * outstanding per byte stream), so async_result_/async_hr_ are safe. */
+/* Async read: always complete immediately via callback. Never return E_PENDING
+ * — MF's TS demuxer blocks forever during initial probing if E_PENDING is
+ * returned, because it waits for a callback that never comes. For 0 bytes
+ * without EOS, use S_OK (not S_FALSE) so MF does not treat it as end-of-stream
+ * during playback. MF serializes BeginRead calls, so async_result_/async_hr_
+ * are safe to use without queuing. */
 STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCallback, IUnknown* pState) {
     if (!pb || !pCallback) return E_POINTER;
 
@@ -230,37 +220,24 @@ STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCal
     if (closed_) { LeaveCriticalSection(&lock_); return E_ABORT; }
     ULONG bytesRead = CopyFromSegmentsLocked(pb, cb);
     bool is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
+    async_result_.store(bytesRead, std::memory_order_release);
+    async_hr_.store(is_eos ? S_FALSE : S_OK, std::memory_order_release);
+    LeaveCriticalSection(&lock_);
 
-    if (bytesRead > 0 || is_eos) {
-        async_result_.store(bytesRead, std::memory_order_release);
-        async_hr_.store(is_eos ? S_FALSE : S_OK, std::memory_order_release);
-        LeaveCriticalSection(&lock_);
+    LOG_INFO("HlsBS: BeginRead(%u) -> %lu bytes (eos=%d)", cb, bytesRead, is_eos);
 
-        pCallback->AddRef();
-        if (pState) pState->AddRef();
-        ComPtr<IMFAsyncResult> result;
-        HRESULT hr = MFCreateAsyncResult(nullptr, pCallback, pState, &result);
-        pCallback->Release();
-        if (pState) pState->Release();
-        if (FAILED(hr)) return hr;
+    ComPtr<IMFAsyncResult> result;
+    if (SUCCEEDED(MFCreateAsyncResult(nullptr, pCallback, pState, &result))) {
         return MFInvokeCallback(result.get());
     }
-
-    PendingRead pr;
-    pr.buf = pb;
-    pr.size = cb;
-    pr.cb = pCallback;
-    pr.state = pState;
-    pCallback->AddRef();
-    if (pState) pState->AddRef();
-    pending_reads_.push_back(pr);
-    LeaveCriticalSection(&lock_);
-    return E_PENDING;
+    return S_OK;
 }
 
 STDMETHODIMP HlsByteStream::EndRead(IMFAsyncResult* /*pResult*/, ULONG* pcbRead) {
     if (pcbRead) *pcbRead = async_result_.load(std::memory_order_acquire);
-    return async_hr_.load(std::memory_order_acquire);
+    HRESULT hr = async_hr_.load(std::memory_order_acquire);
+    LOG_INFO("HlsBS: EndRead -> %lu bytes, hr=0x%08lX", pcbRead ? *pcbRead : 0, hr);
+    return hr;
 }
 
 STDMETHODIMP HlsByteStream::Write(const BYTE*, ULONG, ULONG*) { return E_NOTIMPL; }
@@ -270,17 +247,19 @@ STDMETHODIMP HlsByteStream::EndWrite(IMFAsyncResult*, ULONG*) { return E_NOTIMPL
 STDMETHODIMP HlsByteStream::Seek(MFBYTESTREAM_SEEK_ORIGIN SeekOrigin, LONGLONG llSeekOffset,
                                   DWORD /*dwSeekFlags*/, QWORD* pqwCurrentPosition) {
     EnterCriticalSection(&lock_);
-    CancelPendingReadsLocked();
+    int64_t old_pos = read_pos_.load(std::memory_order_relaxed);
     if (SeekOrigin == 0) {  // MFBYTESTREAM_SEEK_ORIGIN_BEGIN
         read_pos_ = llSeekOffset;
     } else {  // MFBYTESTREAM_SEEK_ORIGIN_CURRENT (only two origins defined in SDK)
-        read_pos_ = read_pos_ + llSeekOffset;
+        read_pos_ = read_pos_.load(std::memory_order_relaxed) + llSeekOffset;
     }
     if (read_pos_ < 0) read_pos_ = 0;
     int64_t tb = total_bytes_.load(std::memory_order_acquire);
     if (read_pos_ > tb) read_pos_ = tb;
     if (pqwCurrentPosition) *pqwCurrentPosition = read_pos_;
+    int64_t new_pos = read_pos_;
     LeaveCriticalSection(&lock_);
+    LOG_INFO("HlsBS: Seek(origin=%d, offset=%lld) pos %lld -> %lld", (int)SeekOrigin, llSeekOffset, old_pos, new_pos);
     return S_OK;
 }
 
@@ -288,7 +267,6 @@ STDMETHODIMP HlsByteStream::Flush() { return S_OK; }
 
 STDMETHODIMP HlsByteStream::Close() {
     EnterCriticalSection(&lock_);
-    CancelPendingReadsLocked();
     closed_ = true;
     segs_.clear();
     total_bytes_ = 0;
@@ -312,40 +290,7 @@ void HlsByteStream::AddSegment(std::vector<uint8_t> data) {
 
     needs_wake_.store(1, std::memory_order_release);
 
-    FulfillPendingReads();
-}
-
-/* Called by AddSegment (download thread) to complete any pending async reads
- * that can now be satisfied. Reads that still have no data are re-queued.
- * Lock is released before MFInvokeCallback to avoid reentrancy deadlocks. */
-void HlsByteStream::FulfillPendingReads() {
-    std::vector<PendingRead> to_fulfill;
-    to_fulfill.swap(pending_reads_);
-
-    for (auto& pr : to_fulfill) {
-        ULONG n = CopyFromSegmentsLocked(pr.buf, pr.size);
-        bool is_eos = (n == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
-
-        if (n == 0 && !is_eos) {
-            pending_reads_.push_back(pr);
-            continue;
-        }
-
-        async_result_.store(n, std::memory_order_release);
-        async_hr_.store(is_eos ? S_FALSE : S_OK, std::memory_order_release);
-        LeaveCriticalSection(&lock_);
-
-        ComPtr<IMFAsyncResult> result;
-        if (SUCCEEDED(MFCreateAsyncResult(nullptr, pr.cb, pr.state, &result))) {
-            MFInvokeCallback(result.get());
-        } else {
-            LOG_ERROR("MFCreateAsyncResult failed in FulfillPendingReads");
-        }
-        pr.cb->Release();
-        if (pr.state) pr.state->Release();
-
-        EnterCriticalSection(&lock_);
-    }
+    LeaveCriticalSection(&lock_);
 }
 
 bool HlsByteStream::CheckAndClearNeedsWake() {
@@ -358,7 +303,6 @@ bool HlsByteStream::HasUnreadData() const {
 
 void HlsByteStream::Clear() {
     EnterCriticalSection(&lock_);
-    CancelPendingReadsLocked();
     segs_.clear();
     total_bytes_ = 0;
     read_pos_ = 0;
@@ -370,27 +314,6 @@ void HlsByteStream::Clear() {
 void HlsByteStream::SetEndOfStream() {
     EnterCriticalSection(&lock_);
     has_eos_marker_ = true;
-
-    std::vector<PendingRead> to_fulfill;
-    to_fulfill.swap(pending_reads_);
-
-    for (auto& pr : to_fulfill) {
-        async_result_.store(0, std::memory_order_release);
-        async_hr_.store(S_FALSE, std::memory_order_release);
-        LeaveCriticalSection(&lock_);
-
-        ComPtr<IMFAsyncResult> result;
-        if (SUCCEEDED(MFCreateAsyncResult(nullptr, pr.cb, pr.state, &result))) {
-            MFInvokeCallback(result.get());
-        } else {
-            LOG_ERROR("MFCreateAsyncResult failed in SetEndOfStream");
-        }
-        pr.cb->Release();
-        if (pr.state) pr.state->Release();
-
-        EnterCriticalSection(&lock_);
-    }
-
     LeaveCriticalSection(&lock_);
 }
 
@@ -704,16 +627,20 @@ bool HlsManager::Open(const wchar_t* url) {
     // Synchronous pre-buffer: download first 3 segments so MF can probe TS
     // container format from the byte stream before source reader creation.
     int prebuf_count = (std::min)(3, (int)segments_.size());
+    LOG_INFO("HLS: Pre-buffering %d segments...", prebuf_count);
     for (int i = 0; i < prebuf_count; i++) {
         std::vector<uint8_t> seg_data;
+        LOG_INFO("HLS: Downloading pre-buffer seg %d/%d...", i + 1, prebuf_count);
         if (!DownloadUrl(segments_[i].url.c_str(), seg_data)) {
             LOG_WARN("HLS: Pre-buffer segment %d failed", i);
             continue;
         }
+        LOG_INFO("HLS: Pre-buffer seg %d: %zu bytes", i + 1, seg_data.size());
         byte_stream_->AddSegment(std::move(seg_data));
         consumed_up_to_.store(i + 1, std::memory_order_release);
         next_segment_to_download_.store(i + 1, std::memory_order_release);
     }
+    LOG_INFO("HLS: Pre-buffer done, starting download thread...");
 
     // Start background download thread for remaining segments.
     // Use consumed_up_to_ (not prebuf_count) so that failed pre-buffer

@@ -38,6 +38,7 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
     bool is_http = (wcsncmp(url, L"http://", 7) == 0) ||
                    (wcsncmp(url, L"https://", 8) == 0);
 
+    LOG_INFO("is_http=%d", is_http);
     ComPtr<IMFSourceReader> reader;
     hr = MFCreateSourceReaderFromURL(url, sattrs.get(), &reader);
     sattrs.reset();
@@ -45,7 +46,9 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
         if (is_http) {
             LOG_WARN("MFCreateSourceReaderFromURL failed: 0x%08lX — trying HLS path", hr);
             reader.reset();
+            LOG_INFO("About to call OpenHls...");
             if (OpenHls(url)) {
+                LOG_INFO("OpenHls succeeded, creating attrs...");
                 // Re-create source reader attributes
                 hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
                 if (FAILED(hr)) return false;
@@ -53,8 +56,10 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
                 if (callback) {
                     sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
                 }
+                LOG_INFO("Calling MFCreateSourceReaderFromByteStream...");
                 hr = MFCreateSourceReaderFromByteStream(
                     hls_->GetByteStream(), sattrs.get(), &reader);
+                LOG_INFO("MFCreateSourceReaderFromByteStream returned: 0x%08lX", hr);
                 sattrs.reset();
                 if (FAILED(hr)) {
                     LOG_ERROR("MFCreateSourceReaderFromByteStream failed: 0x%08lX", hr);

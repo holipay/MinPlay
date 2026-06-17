@@ -114,15 +114,5 @@ private:
     std::atomic<HRESULT> async_hr_{E_ABORT};
     bool cache_data_ = true;
 
-    struct PendingRead {
-        BYTE* buf = nullptr;
-        ULONG size = 0;
-        IMFAsyncCallback* cb = nullptr;
-        IUnknown* state = nullptr;
-    };
-    std::vector<PendingRead> pending_reads_;
-
     ULONG CopyFromSegmentsLocked(BYTE* pb, ULONG cb);
-    void CancelPendingReadsLocked();
-    void FulfillPendingReads();
 };
