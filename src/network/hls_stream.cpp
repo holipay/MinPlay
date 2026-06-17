@@ -649,6 +649,7 @@ bool HlsManager::Open(const wchar_t* url) {
         base_url_ = std::wstring(url, 0, last_slash + 1);
 
     LOG_INFO("HLS: Opening %ws", url);
+    download_running_ = true;
 
     std::vector<uint8_t> content;
     if (!DownloadUrl(url, content)) {
@@ -710,7 +711,6 @@ bool HlsManager::Open(const wchar_t* url) {
 
     // Start background download thread for remaining segments
     next_segment_to_download_ = prebuffer;
-    download_running_ = true;
     download_thread_ = CreateThread(nullptr, 0,
         [](LPVOID arg) -> DWORD {
             ((HlsManager*)arg)->DownloadLoop();

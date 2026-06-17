@@ -399,6 +399,12 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         vq_fmt = pix_fmt_;
     }
 
+    if (vq_fmt == PixelFormat::NV12 && fh > 0 && cur_len_dw > 0) {
+        size_t nv12_pitch = (size_t)fh * 3 / 2;
+        int actual = (int)((size_t)cur_len_dw / nv12_pitch);
+        if (actual >= fw) fs = actual;
+    }
+
     if (vq_fmt == PixelFormat::YUY2 && fw > 0 && fh > 0) {
         converted = ConvertYUY2ToNV12(data, fw, fh);
         if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; fs = fw; frame_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX); }
