@@ -73,6 +73,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             break;
 
+        case WM_OPEN_COMPLETE:
+            if (!g_player) break;
+            if (wp == 0 || !g_player->IsOpenSuccessful()) {
+                KillTimer(hwnd, TIMER_EOF_CHECK);
+                DestroyWindow(hwnd);
+                break;
+            }
+            SetWindowText(hwnd, TEXT("MinPlay"));
+            g_player->Play();
+            // Audio ring-buffer refill timer (Play() handles video timer internally)
+            if (!SetTimer(hwnd, TIMER_AUDIO_CHECK, 50, nullptr))
+                LOG_WARN("Failed to create audio check timer");
+            break;
+
         case WM_RESTART_LIVE:
             if (g_player)
                 g_player->FlushAndRestart();
@@ -181,32 +195,17 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     }
     SetWindowText(g_hwnd, TEXT("MinPlay - Loading..."));
     bool open_ok = g_player->Open(g_hwnd, url);
-    SetWindowText(g_hwnd, TEXT("MinPlay"));
     if (!open_ok) {
-        // Open() already logs specifics; show generic error to user
         MessageBoxA(nullptr, "Failed to open media file.\nSee console for details.", "Error", MB_OK);
         delete g_player; g_player = nullptr;
         return 1;
     }
 
-    g_player->Play();
-    if (!SetTimer(g_hwnd, TIMER_AUDIO_CHECK, 50, nullptr))
-        LOG_WARN("Failed to create audio check timer");
-    if (g_player->HasVideo()) {
-        double fps = g_player->GetVideoFps();
-        int period = fps > 0 ? (int)(1000.0 / fps) : 33;
-        if (period < 1) period = 1;
-        if (!SetTimer(g_hwnd, TIMER_VIDEO_DISPLAY, period, nullptr))
-            LOG_WARN("Failed to create video timer");
-    }
+    // EOF check timer watches for open timeout and playback completion
     if (!SetTimer(g_hwnd, TIMER_EOF_CHECK, 500, nullptr))
         LOG_WARN("Failed to create EOF check timer");
 
-    /* Fire an immediate video tick to minimize A/V startup gap */
-    if (g_player->HasVideo())
-        PostMessage(g_hwnd, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
-
-    LOG_INFO("Playing: %S", url);
+    LOG_INFO("Opening: %S", url);
 
     int ret = RunMessageLoop();
 

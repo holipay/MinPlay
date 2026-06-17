@@ -61,7 +61,6 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
         LOG_CRITICAL("Out of memory: callback_");
         return false;
     }
-    callback_->AddRef();
 
     osd_ = new (std::nothrow) OSD();
     if (!osd_)
@@ -225,7 +224,8 @@ void Player::Close() {
 
 void Player::Play() {
     if (!source_) return;
-    if (state_.load(std::memory_order_acquire) != PlayerState::Stopped) return;
+    auto s = state_.load(std::memory_order_acquire);
+    if (s != PlayerState::Stopped && s != PlayerState::Opening) return;
 
     state_.store(PlayerState::Playing, std::memory_order_release);
     start_time_.store(GetTimeSec(perf_freq_), std::memory_order_release);
@@ -351,6 +351,8 @@ void Player::Paint(HDC hdc, int /*w*/, int /*h*/) {
 }
 
 bool Player::IsFinished() const {
+    auto s = state_.load(std::memory_order_acquire);
+    if (s != PlayerState::Playing && s != PlayerState::Paused) return false;
     if (source_ && source_->IsLive()) return false;
     bool vq_empty;
     {
