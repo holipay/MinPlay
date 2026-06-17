@@ -396,8 +396,15 @@ uint8_t* Player::ConvertI420ToNV12(const uint8_t* i420, int w, int h) {
 
 void Player::TryRestartLivePipeline() {
     if (!source_ || !source_->IsLive() || !callback_) return;
-    if (!source_->HlsByteStreamHasData() || !source_->HasNewHlsData()) return;
-    if (!callback_->IsVideoEof() && !callback_->IsAudioEof()) return;
+
+    // Check if pipeline is stalled: no video frames for 3 seconds
+    double now = GetTimeSec(perf_freq_);
+    double last_frame = last_video_frame_time_.load(std::memory_order_acquire);
+    bool stalled = (last_frame > 0 && (now - last_frame) > 3.0);
+
+    if (!stalled && !source_->HlsByteStreamHasData()) return;
+    if (!stalled && !source_->HasNewHlsData()) return;
+    if (!stalled && !callback_->IsVideoEof() && !callback_->IsAudioEof()) return;
 
     // Prevent concurrent restart from both VideoTick and CheckAudio
     bool expected = false;
@@ -538,6 +545,8 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 
     free(converted);
     buf->Unlock();
+
+    last_video_frame_time_.store(GetTimeSec(perf_freq_), std::memory_order_release);
 
     if (was_empty && video_first_frame_post_.exchange(0, std::memory_order_acq_rel))
         PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
