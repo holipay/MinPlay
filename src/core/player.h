@@ -15,6 +15,7 @@
 #define TIMER_AUDIO_CHECK   1
 #define TIMER_VIDEO_DISPLAY 2
 #define TIMER_EOF_CHECK     3
+#define WM_RESTART_LIVE     (WM_APP + 1)
 
 // Audio buffering thresholds
 constexpr int AUDIO_BUFFER_NETWORK_MULT = 5;   // 5 × bitrate for network (5 s buffer)
@@ -60,6 +61,7 @@ public:
     double GetVideoFps() const { return video_fps_.load(std::memory_order_relaxed); }
     bool IsFinished() const;
     void OnVideoFormatChanged();
+    void FlushAndRestart();
 
 private:
     void TryRestartLivePipeline();

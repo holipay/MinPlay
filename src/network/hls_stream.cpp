@@ -214,7 +214,8 @@ STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
     LeaveCriticalSection(&lock_);
     if (pcbRead) *pcbRead = total_read;
     if (total_read > 0) return S_OK;
-    // No data available but no EOS — not end of stream, caller should retry
+    // No data available but no EOS — brief yield to avoid MF tight loop
+    Sleep(1);
     return S_OK;
 }
 
@@ -845,8 +846,11 @@ void HlsManager::DownloadLoop() {
             continue;
         }
 
+        if (!download_running_) break;
+
         std::vector<uint8_t> seg_data;
         if (!DownloadUrl(url.c_str(), seg_data)) {
+            if (!download_running_) break;
             retry_count++;
             if (retry_count >= 3) {
                 LOG_WARN("HLS: Skipping segment %d after %d failures", idx, 3);
@@ -856,7 +860,7 @@ void HlsManager::DownloadLoop() {
             }
             LOG_WARN("HLS: Failed to download segment %d (attempt %d/3), retrying",
                      idx, retry_count);
-            Sleep(1000);
+            WaitForSingleObject(wake_event_, 1000);
             continue;
         }
         retry_count = 0;

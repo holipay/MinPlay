@@ -354,6 +354,12 @@ void Player::TryRestartLivePipeline() {
     if (!live_restarting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
 
+    // Defer actual Flush + restart to message loop — avoids blocking WM_TIMER
+    // with MF internal locks held during Flush() calls.
+    PostMessage(hwnd_, WM_RESTART_LIVE, 0, 0);
+}
+
+void Player::FlushAndRestart() {
     LOG_INFO("Live: new HLS data, flushing + restarting pipeline");
     if (source_->GetReader()) {
         IMFSourceReader* r = source_->GetReader();

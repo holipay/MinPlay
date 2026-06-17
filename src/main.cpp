@@ -73,6 +73,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             break;
 
+        case WM_RESTART_LIVE:
+            if (g_player)
+                g_player->FlushAndRestart();
+            break;
+
         case WM_DESTROY:
             PostQuitMessage(0);
             break;
