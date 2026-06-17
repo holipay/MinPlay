@@ -50,6 +50,7 @@ public:
 
     void Resize(int w, int h);
     void Paint(HDC hdc, int w, int h);
+    void DrawOSD(HDC hdc);
     void VideoTick();
     void CheckAudio();
     void ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp);
@@ -119,10 +120,11 @@ private:
     int vq_tail_ = 0;
     mutable std::mutex vq_mutex_;
 
-    // Render frame buffer (protected by frame_mutex_)
-    mutable std::mutex frame_mutex_;
+    // Render frame buffer (only accessed from main thread)
     uint8_t* frame_buf_ = nullptr;
     int frame_buf_size_ = 0;
+    uint8_t* convert_buf_ = nullptr;
+    int convert_buf_size_ = 0;
     bool frame_ready_ = false;
     int frame_render_w_ = 0;
     int frame_render_h_ = 0;

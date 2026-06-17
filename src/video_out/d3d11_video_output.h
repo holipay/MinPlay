@@ -5,12 +5,15 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
+#include <dxgi1_2.h>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 
 struct D3D11Vertex { float pos[2]; float uv[2]; };
+
+using OverlayDrawFunc = void (*)(HDC hdc, int w, int h, void* ctx);
 
 class D3D11VideoOutput : public VideoOutput {
 public:
@@ -24,6 +27,8 @@ public:
 
     void Render(const uint8_t* data, int src_w, int src_h, int stride, PixelFormat fmt) override;
     void Resize(int w, int h) override;
+
+    void SetOverlay(OverlayDrawFunc func, void* ctx) { overlay_func_ = func; overlay_ctx_ = ctx; }
 
 private:
     static constexpr const char* VS_SRC =
@@ -86,6 +91,9 @@ private:
     int tex_h_ = 0;
     int tex_is_nv12_ = 0;
     bool was_iconic_ = false;
+
+    OverlayDrawFunc overlay_func_ = nullptr;
+    void* overlay_ctx_ = nullptr;
 
     static HRESULT CompileShader(const char* src, const char* target, ID3DBlob** blob);
     void ReleaseD3D11();

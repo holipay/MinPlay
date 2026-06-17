@@ -93,7 +93,7 @@ STDMETHODIMP HlsByteStream::GetCapabilities(DWORD* pdwCapabilities) {
     *pdwCapabilities = MFBYTESTREAM_IS_READABLE
                      | MFBYTESTREAM_IS_SEEKABLE
                      | MFBYTESTREAM_IS_PARTIALLY_DOWNLOADED;
-    LOG_INFO("HlsBS: GetCapabilities -> 0x%08lX", *pdwCapabilities);
+    LOG_DEBUG("HlsBS: GetCapabilities -> 0x%08lX", *pdwCapabilities);
     return S_OK;
 }
 
@@ -102,7 +102,7 @@ STDMETHODIMP HlsByteStream::GetLength(QWORD* pqwLength) {
     EnterCriticalSection(&lock_);
     *pqwLength = total_bytes_;
     LeaveCriticalSection(&lock_);
-    LOG_INFO("HlsBS: GetLength -> %llu", *pqwLength);
+    LOG_DEBUG("HlsBS: GetLength -> %llu", *pqwLength);
     return S_OK;
 }
 
@@ -115,12 +115,12 @@ STDMETHODIMP HlsByteStream::GetCurrentPosition(QWORD* pqwPosition) {
     EnterCriticalSection(&lock_);
     *pqwPosition = read_pos_;
     LeaveCriticalSection(&lock_);
-    LOG_INFO("HlsBS: GetCurrentPosition -> %lld", *pqwPosition);
+    LOG_DEBUG("HlsBS: GetCurrentPosition -> %lld", *pqwPosition);
     return S_OK;
 }
 
 STDMETHODIMP HlsByteStream::SetCurrentPosition(QWORD qwPosition) {
-    LOG_INFO("HlsBS: SetCurrentPosition(%llu)", qwPosition);
+    LOG_DEBUG("HlsBS: SetCurrentPosition(%llu)", qwPosition);
     EnterCriticalSection(&lock_);
     read_pos_ = (int64_t)qwPosition;
     LeaveCriticalSection(&lock_);
@@ -134,7 +134,7 @@ STDMETHODIMP HlsByteStream::IsEndOfStream(BOOL* pfEndOfStream) {
     int64_t rp = read_pos_;
     int64_t tb = total_bytes_;
     LeaveCriticalSection(&lock_);
-    LOG_INFO("HlsBS: IsEndOfStream -> %d (eos=%d pos=%lld total=%lld)",
+    LOG_DEBUG("HlsBS: IsEndOfStream -> %d (eos=%d pos=%lld total=%lld)",
              *pfEndOfStream, has_eos_marker_, rp, tb);
     return S_OK;
 }
@@ -194,13 +194,13 @@ STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
     if (total_read == 0 && has_eos_marker_ && read_pos_ >= total_bytes_) {
         LeaveCriticalSection(&lock_);
         if (pcbRead) *pcbRead = 0;
-        LOG_INFO("HlsBS: Read(%u) -> S_FALSE (EOS)", cb);
+        LOG_DEBUG("HlsBS: Read(%u) -> S_FALSE (EOS)", cb);
         return S_FALSE;
     }
 
     LeaveCriticalSection(&lock_);
     if (pcbRead) *pcbRead = total_read;
-    LOG_INFO("HlsBS: Read(%u) -> %lu bytes, S_OK", cb, total_read);
+    LOG_DEBUG("HlsBS: Read(%u) -> %lu bytes, S_OK", cb, total_read);
     if (total_read > 0) return S_OK;
     // No data available but no EOS — brief yield to avoid MF tight loop
     SwitchToThread(); // yield instead of sleeping
@@ -224,7 +224,7 @@ STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCal
     async_hr_.store(is_eos ? S_FALSE : S_OK, std::memory_order_release);
     LeaveCriticalSection(&lock_);
 
-    LOG_INFO("HlsBS: BeginRead(%u) -> %lu bytes (eos=%d)", cb, bytesRead, is_eos);
+    LOG_DEBUG("HlsBS: BeginRead(%u) -> %lu bytes (eos=%d)", cb, bytesRead, is_eos);
 
     // Yield CPU when no data available — prevents MF tight-loop during
     // source reader creation if TS demuxer polls BeginRead rapidly.
@@ -241,7 +241,7 @@ STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCal
 STDMETHODIMP HlsByteStream::EndRead(IMFAsyncResult* /*pResult*/, ULONG* pcbRead) {
     if (pcbRead) *pcbRead = async_result_.load(std::memory_order_acquire);
     HRESULT hr = async_hr_.load(std::memory_order_acquire);
-    LOG_INFO("HlsBS: EndRead -> %lu bytes, hr=0x%08lX", pcbRead ? *pcbRead : 0, hr);
+    LOG_DEBUG("HlsBS: EndRead -> %lu bytes, hr=0x%08lX", pcbRead ? *pcbRead : 0, hr);
     return hr;
 }
 
@@ -264,7 +264,7 @@ STDMETHODIMP HlsByteStream::Seek(MFBYTESTREAM_SEEK_ORIGIN SeekOrigin, LONGLONG l
     if (pqwCurrentPosition) *pqwCurrentPosition = read_pos_;
     int64_t new_pos = read_pos_;
     LeaveCriticalSection(&lock_);
-    LOG_INFO("HlsBS: Seek(origin=%d, offset=%lld) pos %lld -> %lld", (int)SeekOrigin, llSeekOffset, old_pos, new_pos);
+    LOG_DEBUG("HlsBS: Seek(origin=%d, offset=%lld) pos %lld -> %lld", (int)SeekOrigin, llSeekOffset, old_pos, new_pos);
     return S_OK;
 }
 
@@ -417,8 +417,15 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
     uint8_t buf[65536];
     DWORD bytes_read = 0;
     const size_t MAX_DOWNLOAD_SIZE = 200 * 1024 * 1024;  // 200MB safety limit
-    while (download_running_ &&
-           WinHttpReadData(hRequest, buf, sizeof(buf), &bytes_read) && bytes_read > 0) {
+    bool read_ok = true;
+    while (download_running_) {
+        bytes_read = 0;
+        if (!WinHttpReadData(hRequest, buf, sizeof(buf), &bytes_read)) {
+            LOG_ERROR("WinHttpReadData failed: %u", GetLastError());
+            read_ok = false;
+            break;
+        }
+        if (bytes_read == 0) break;
         if (out.size() + bytes_read > MAX_DOWNLOAD_SIZE) {
             LOG_WARN("Download exceeds %zuMB limit, aborting", MAX_DOWNLOAD_SIZE / (1024*1024));
             return false;
@@ -427,7 +434,7 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
     }
 
     if (!download_running_) return false;
-    return true;
+    return read_ok;
 }
 
 std::wstring HlsManager::ResolveUrl(const std::wstring& base, const std::wstring& relative) {
@@ -780,6 +787,7 @@ void HlsManager::DownloadLoop() {
 
         // Check if already downloaded (pre-buffered or previous loop iteration)
         if (idx < consumed_up_to_.load(std::memory_order_acquire)) {
+            retry_count = 0;
             next_segment_to_download_.fetch_add(1, std::memory_order_relaxed);
             continue;
         }

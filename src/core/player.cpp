@@ -19,6 +19,11 @@ Player::~Player() {
     Close();
 }
 
+static void OSDOverlayCallback(HDC hdc, int /*w*/, int /*h*/, void* ctx) {
+    Player* self = (Player*)ctx;
+    self->DrawOSD(hdc);
+}
+
 double Player::GetTimeSec(const LARGE_INTEGER& freq) {
     LARGE_INTEGER li;
     QueryPerformanceCounter(&li);
@@ -152,6 +157,7 @@ void Player::OpenAsync(std::wstring url) {
         D3D11VideoOutput* d3d_vo = new (std::nothrow) D3D11VideoOutput();
         if (d3d_vo) {
             if (d3d_vo->Initialize(hwnd_, win_w_, win_h_)) {
+                d3d_vo->SetOverlay(OSDOverlayCallback, this);
                 vo_ = d3d_vo;
             } else {
                 LOG_ERROR("Failed to initialize D3D11 video output");
@@ -218,6 +224,9 @@ void Player::Close() {
     free(frame_buf_);
     frame_buf_ = nullptr;
     frame_buf_size_ = 0;
+    free(convert_buf_);
+    convert_buf_ = nullptr;
+    convert_buf_size_ = 0;
     frame_size_ = 0;
     pix_fmt_.store(PixelFormat::Unknown, std::memory_order_relaxed);
 }
@@ -270,8 +279,9 @@ void Player::Seek(double seconds) {
     if (!source_) return;
     if (source_->IsLive()) return;
     if (seconds < 0) seconds = 0;
-    bool was_playing = (state_.load(std::memory_order_acquire) == PlayerState::Playing);
-    bool was_paused  = (state_.load(std::memory_order_acquire) == PlayerState::Paused);
+    auto s = state_.load(std::memory_order_acquire);
+    bool was_playing = (s == PlayerState::Playing);
+    bool was_paused  = (s == PlayerState::Paused);
 
     if (callback_) callback_->Stop();
     if (ao_) ao_->Reset();
@@ -285,10 +295,7 @@ void Player::Seek(double seconds) {
 
     source_->Seek(seconds);
 
-    {
-        std::lock_guard<std::mutex> lock(frame_mutex_);
-        frame_ready_ = false;
-    }
+    frame_ready_ = false;
 
     // Update time base so ElapsedSec() returns the seeked position
     double now = GetTimeSec(perf_freq_);
@@ -343,11 +350,14 @@ void Player::Resize(int w, int h) {
 }
 
 void Player::Paint(HDC hdc, int /*w*/, int /*h*/) {
+    DrawOSD(hdc);
+}
+
+void Player::DrawOSD(HDC hdc) {
     if (osd_) {
         osd_->Draw(hdc, GetPosition(), GetDuration(),
                    (int)video_fps_.load(std::memory_order_relaxed));
     }
-    PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
 }
 
 bool Player::IsFinished() const {
@@ -361,7 +371,6 @@ bool Player::IsFinished() const {
     }
     bool f_ready;
     {
-        std::lock_guard<std::mutex> lock(frame_mutex_);
         f_ready = frame_ready_;
     }
     bool vdone  = !has_video_ || (callback_ && callback_->IsVideoEof() && vq_empty && !f_ready);
@@ -401,6 +410,14 @@ void Player::TryRestartLivePipeline() {
 }
 
 void Player::FlushAndRestart() {
+    // Don't restart pipeline when paused — download thread may add segments,
+    // but restarting would reset the clock and waste CPU. When resumed,
+    // PauseToggle() will call StartReading() which re-primes the pipeline.
+    if (state_.load(std::memory_order_acquire) != PlayerState::Playing) {
+        live_restarting_.store(false, std::memory_order_release);
+        return;
+    }
+
     LOG_INFO("Live: new HLS data, flushing + restarting pipeline");
     // Use Stop()+StartReading() instead of Flush() — Flush() is synchronous
     // and deadlocks when the MF work thread also calls Flush() in the
@@ -462,13 +479,27 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     }
 
     if (vq_fmt == PixelFormat::YUY2 && fw > 0 && fh > 0) {
-        converted = ConvertYUY2ToNV12(data, fw, fh);
-        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; fs = fw; frame_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX); }
-        else { LOG_WARN("YUY2→NV12 OOM for %dx%d", fw, fh); buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
+        int nv12_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX);
+        if (convert_buf_size_ < nv12_size) {
+            free(convert_buf_);
+            convert_buf_ = (uint8_t*)malloc(nv12_size);
+            convert_buf_size_ = convert_buf_ ? nv12_size : 0;
+        }
+        if (convert_buf_ && ::ConvertYUY2ToNV12(data, fw, fh, convert_buf_, nv12_size)) {
+            frame_data = convert_buf_; converted = nullptr;
+            vq_fmt = PixelFormat::NV12; fs = fw; frame_size = nv12_size;
+        } else { LOG_WARN("YUY2→NV12 failed for %dx%d", fw, fh); buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
     } else if (vq_fmt == PixelFormat::I420 && fw > 0 && fh > 0) {
-        converted = ConvertI420ToNV12(data, fw, fh);
-        if (converted) { frame_data = converted; vq_fmt = PixelFormat::NV12; fs = fw; frame_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX); }
-        else { LOG_WARN("I420→NV12 OOM for %dx%d", fw, fh); buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
+        int nv12_size = (int)(std::min)((size_t)fw * fh * 3 / 2, (size_t)INT_MAX);
+        if (convert_buf_size_ < nv12_size) {
+            free(convert_buf_);
+            convert_buf_ = (uint8_t*)malloc(nv12_size);
+            convert_buf_size_ = convert_buf_ ? nv12_size : 0;
+        }
+        if (convert_buf_ && ::ConvertI420ToNV12(data, fw, fh, convert_buf_, nv12_size)) {
+            frame_data = convert_buf_; converted = nullptr;
+            vq_fmt = PixelFormat::NV12; fs = fw; frame_size = nv12_size;
+        } else { LOG_WARN("I420→NV12 failed for %dx%d", fw, fh); buf->Unlock(); if (callback_) callback_->ConsumeVideo(); return; }
     }
 
     bool was_empty;
@@ -564,7 +595,6 @@ void Player::VideoTick() {
                 break;
             }
             {
-                std::lock_guard<std::mutex> lock_f(frame_mutex_);
                 if (f->size > frame_buf_size_) {
                     uint8_t* nb = (uint8_t*)realloc(frame_buf_, f->size);
                     if (nb) {
@@ -617,11 +647,14 @@ void Player::OnVideoFormatChanged() {
     LOG_INFO("Player video format updated: %dx%d stride=%d @ %.1f fps",
              frame_w_.load(std::memory_order_relaxed), frame_h_.load(std::memory_order_relaxed),
              stride_.load(std::memory_order_relaxed), video_fps_.load(std::memory_order_relaxed));
+
+    // Restart video timer with updated FPS interval
+    StopVideoTimer();
+    StartVideoTimer();
 }
 
 bool Player::RenderD3D(int w, int h) {
     if (!vo_) return false;
-    std::lock_guard<std::mutex> lock(frame_mutex_);
     if (frame_ready_ && frame_buf_ && frame_render_w_ > 0 && frame_render_h_ > 0) {
         vo_->Resize(w, h);
         int stride = frame_stride_;

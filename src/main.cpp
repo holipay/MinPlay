@@ -18,9 +18,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HDC hdc = BeginPaint(hwnd, &ps);
             RECT rc;
             GetClientRect(hwnd, &rc);
-            if (g_player) {
-                g_player->Paint(hdc, rc.right, rc.bottom);
-            } else {
+            if (!g_player) {
                 FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
             }
             EndPaint(hwnd, &ps);
@@ -32,8 +30,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_SIZE: {
             int nw = LOWORD(lp), nh = HIWORD(lp);
-            if (g_player) g_player->Resize(nw, nh);
-            // D3D11 renders via WM_TIMER, not WM_PAINT — skip InvalidateRect
+            if (g_player) {
+                g_player->Resize(nw, nh);
+                // Trigger immediate re-render so content is correct before next timer tick
+                PostMessage(hwnd, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
+            }
             break;
         }
 

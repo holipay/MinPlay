@@ -23,11 +23,11 @@ Single C++ (COM-style) project. No packages. Tests in `tests/` (29 tests, `build
 | Callback | `src/core/source_reader_callback.cpp` | IMFSourceReaderCallback impl, routes samples |
 | Media | `src/media/media_source.cpp` | MFSourceReader setup, stream enumeration |
 | Audio out | `src/audio_out/wasapi_audio_output.cpp` | WASAPI event-driven, ring buffer, resampling |
-| Video out | `src/video_out/d3d11_video_output.cpp` | D3D11 rendering with NV12 GPU shader |
+| Video out | `src/video_out/d3d11_video_output.cpp` | D3D11 rendering with NV12 GPU shader, GDI OSD overlay |
 | Network | `src/network/hls_stream.cpp` | HLS m3u8 parser, WinHTTP downloader, IMFByteStream |
-| OSD | `src/util/osd.cpp` | Time/fps overlay |
+| OSD | `src/util/osd.cpp` | Time/fps overlay (drawn via GDI on D3D11 back buffer) |
 
-Data flow: MF callback → audio direct to ring / video `player_process_video_frame` (both in MF thread) → `WM_TIMER` (main thread) → `player_video_tick` sync + `vo_render` D3D11 → GPU YUV→RGB via pixel shader.
+Data flow: MF callback → audio direct to ring / video `player_process_video_frame` (both in MF thread) → `WM_TIMER` (main thread) → `player_video_tick` sync + `vo_render` D3D11 → GPU YUV→RGB via pixel shader → GDI OSD overlay on back buffer → Present.
 
 ## Critical gotchas
 
@@ -53,13 +53,14 @@ Data flow: MF callback → audio direct to ring / video `player_process_video_fr
 - **Live pipeline restart via needs_wake_**: If the pipeline stalls (EOF signaled by MF before new segments arrived), `AddSegment` sets `needs_wake_` flag. The player's `CheckAudio()` and `VideoTick()` timers check `source_->HasNewHlsData()` for live streams; if true, they flush the source reader (to clear MF's internal EOF state), reset EOF flags via `ResetAudioEof()`/`ResetVideoEof()`, and re-request samples.
 - **HlsManager playlist reload**: `DownloadLoop()` calls `ReloadPlaylist()` for live streams after all known segments are consumed. `ReloadPlaylist` re-downloads the media m3u8, compares segment URLs against existing ones, and adds only genuinely new segments to the byte stream via `AddSegment`.
 - **Network buffering**: Audio threshold is bps*5 (5s) for network vs bps/5 (200ms) for local files. Video queue fill target is 15 frames for network vs 1 for local. VQ_SIZE=32.
+- **OSD via D3D11 back buffer GDI interop**: OSD text is drawn via GDI on the D3D11 back buffer before `Present()`. Uses `IDXGISurface1::GetDC()` on the swap chain back buffer. Requires `DXGI_SWAP_EFFECT_DISCARD` (not FLIP_DISCARD — FLIP doesn't support GDI interop). The overlay callback is set via `D3D11VideoOutput::SetOverlay()`, called from `Player::OpenAsync()` after D3D11 init.
 
 ## Current state
 
 HLS streaming works (live and VOD):
 - m3u8 parsed (master → media playlist), WinHTTP downloads TS segments
 - Custom HlsByteStream (IMFByteStream) feeds concatenated TS data to MF TS demuxer
-- Pre-buffers 3 segments before source reader creation; background thread continues download
+- Pre-buffers 1 segment before source reader creation; background thread continues download
 - Adaptive bitrate media type changes handled (resolution changes filtered for stride-only)
 - Playlist reload for live streams: download loop calls `ReloadPlaylist()` when all known segments are consumed; new segments are parsed, downloaded, and added to the byte stream
 - `BeginRead` always completes immediately via callback (never `E_PENDING`) — avoids MF TS demuxer hang during initial probing
@@ -78,6 +79,7 @@ Video rendering is optimized:
 - YUY2/I420 → NV12 conversion is lightweight data rearrangement (no color math)
 - `VideoTick` early-exits when no frames in queue
 - Network streams target 15 buffered frames vs 1 for local (VQ_SIZE=32)
+- OSD overlay drawn via GDI on D3D11 back buffer (requires `DXGI_SWAP_EFFECT_DISCARD` for GDI interop)
 
 ## Security
 

@@ -95,14 +95,13 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
         hr = reader->SetCurrentMediaType(
             (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, vmt.get());
         if (SUCCEEDED(hr)) {
-            has_video_ = true;
-            pix_fmt_ = f.pf;
-
             ComPtr<IMFMediaType> native;
             if (FAILED(reader->GetCurrentMediaType(
                 (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &native)) || !native) {
                 continue;
             }
+            has_video_ = true;
+            pix_fmt_ = f.pf;
             UINT32 w = 0, h = 0, num = 0, den = 0;
             GetUint64Pair(native.get(), MF_MT_FRAME_SIZE, &w, &h);
             GetUint64Pair(native.get(), MF_MT_FRAME_RATE, &num, &den);
