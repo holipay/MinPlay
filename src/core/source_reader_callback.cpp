@@ -74,11 +74,18 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
     }
 
     if (dwStreamFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
+        // Set EOF flag so stall detection can trigger RecreateReader if needed
         if (dwStreamIndex == self->video_stream_)
-            self->video_eof_ = true;
+            self->video_eof_.store(true, std::memory_order_release);
         else if (dwStreamIndex == self->audio_stream_)
-            self->audio_eof_ = true;
-        LOG_INFO("EOF stream=%lu", dwStreamIndex);
+            self->audio_eof_.store(true, std::memory_order_release);
+        LOG_DEBUG("EOF stream=%lu", dwStreamIndex);
+        // Also re-request — if new data arrives, MF might recover without restart
+        CHECK_READER("eof re-request");
+        if (self->running_.load(std::memory_order_acquire)) {
+            Sleep(50);
+            self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
+        }
         return S_OK;
     }
 

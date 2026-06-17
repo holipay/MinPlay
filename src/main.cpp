@@ -140,6 +140,12 @@ static void ApplyProcessMitigations() {
 }
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    // Allocate console for log output
+    AllocConsole();
+    FILE* dummy;
+    freopen_s(&dummy, "CONOUT$", "w", stderr);
+    freopen_s(&dummy, "CONOUT$", "w", stdout);
+
     ApplyProcessMitigations();
 
     ComInit com;

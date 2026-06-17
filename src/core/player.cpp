@@ -397,43 +397,52 @@ uint8_t* Player::ConvertI420ToNV12(const uint8_t* i420, int w, int h) {
 void Player::TryRestartLivePipeline() {
     if (!source_ || !source_->IsLive() || !callback_) return;
 
-    // Check if pipeline is stalled: no video frames for 3 seconds
+    // Only restart if truly stalled: no video frames for 3+ seconds
     double now = GetTimeSec(perf_freq_);
     double last_frame = last_video_frame_time_.load(std::memory_order_acquire);
     bool stalled = (last_frame > 0 && (now - last_frame) > 3.0);
 
-    if (!stalled && !source_->HlsByteStreamHasData()) return;
-    if (!stalled && !source_->HasNewHlsData()) return;
-    if (!stalled && !callback_->IsVideoEof() && !callback_->IsAudioEof()) return;
+    if (!stalled) return;
 
-    // Prevent concurrent restart from both VideoTick and CheckAudio
+    // Require new data available before restarting
+    if (!source_->HlsByteStreamHasData()) return;
+    if (!source_->HasNewHlsData()) return;
+
+    LOG_INFO("Live: pipeline stalled for %.1fs, attempting restart", now - last_frame);
+
+    // Cooldown: don't restart more than once every 5 seconds
+    double last_restart = last_restart_time_.load(std::memory_order_acquire);
+    if (last_restart > 0 && (now - last_restart) < 5.0) return;
+    last_restart_time_.store(now, std::memory_order_release);
+
+    // Prevent concurrent restart
     bool expected = false;
     if (!live_restarting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
 
-    // Defer actual Flush + restart to message loop — avoids blocking WM_TIMER
-    // with MF internal locks held during Flush() calls.
     PostMessage(hwnd_, WM_RESTART_LIVE, 0, 0);
 }
 
 void Player::FlushAndRestart() {
-    // Don't restart pipeline when paused — download thread may add segments,
-    // but restarting would reset the clock and waste CPU. When resumed,
-    // PauseToggle() will call StartReading() which re-primes the pipeline.
     if (state_.load(std::memory_order_acquire) != PlayerState::Playing) {
         live_restarting_.store(false, std::memory_order_release);
         return;
     }
 
-    LOG_INFO("Live: new HLS data, flushing + restarting pipeline");
-    // Use Stop()+StartReading() instead of Flush() — Flush() is synchronous
-    // and deadlocks when the MF work thread also calls Flush() in the
-    // OnReadSample error path. Stop() waits for in-flight callbacks (5s max),
-    // increments generation_ to discard stale samples, then StartReading()
-    // re-requests fresh data from the byte stream.
+    LOG_INFO("Live: flushing + restarting pipeline");
+    // Stop callbacks and wait for in-flight to finish
     callback_->Stop();
     callback_->ResetVideoEof();
     callback_->ResetAudioEof();
+
+    // Recreate source reader to clear MF's internal EOF state
+    IMFSourceReader* new_reader = source_->RecreateReader(callback_);
+    if (new_reader) {
+        callback_->SetReader(new_reader,
+                             source_->GetVideoStream(),
+                             source_->GetAudioStream());
+    }
+
     // Reset clock so new frame timestamps (~0) match the wall clock
     double now = GetTimeSec(perf_freq_);
     start_time_.store(now, std::memory_order_release);
@@ -442,6 +451,7 @@ void Player::FlushAndRestart() {
     if (sync_) sync_->Seek();
     callback_->StartReading();
 
+    LOG_INFO("Live: pipeline restarted");
     live_restarting_.store(false, std::memory_order_release);
 }
 

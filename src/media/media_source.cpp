@@ -227,6 +227,82 @@ void MediaSource::ReconfigureVideo() {
     }
 }
 
+IMFSourceReader* MediaSource::RecreateReader(IMFSourceReaderCallback* callback) {
+    if (!hls_ || !hls_->GetByteStream()) return nullptr;
+
+    LOG_INFO("Recreating source reader from byte stream");
+
+    // Hold extra reference on byte stream to prevent destruction during recreation
+    HlsByteStream* bs = hls_->GetByteStream();
+    bs->AddRef();
+
+    // Create new attributes
+    ComPtr<IMFAttributes> sattrs;
+    HRESULT hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
+    if (FAILED(hr)) {
+        LOG_ERROR("MFCreateAttributes failed: 0x%08lX", hr);
+        bs->Release();
+        return nullptr;
+    }
+    sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    if (callback) {
+        sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
+    }
+
+    // Create new source reader from byte stream
+    ComPtr<IMFSourceReader> new_reader;
+    hr = MFCreateSourceReaderFromByteStream(
+        hls_->GetByteStream(), sattrs.get(), &new_reader);
+    sattrs.reset();
+    if (FAILED(hr)) {
+        LOG_ERROR("MFCreateSourceReaderFromByteStream failed: 0x%08lX", hr);
+        bs->Release();
+        return nullptr;
+    }
+
+    // Re-set video output format on new reader
+    if (has_video_) {
+        ComPtr<IMFMediaType> vmt;
+        if (SUCCEEDED(MFCreateMediaType(&vmt))) {
+            vmt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+            struct { const GUID* fmt; } fmts[] = {
+                { &MFVideoFormat_NV12 }, { &MFVideoFormat_I420 },
+                { &MFVideoFormat_YUY2 }, { &MFVideoFormat_ARGB32 },
+                { &MFVideoFormat_RGB32 },
+            };
+            for (auto& f : fmts) {
+                vmt->SetGUID(MF_MT_SUBTYPE, *f.fmt);
+                if (SUCCEEDED(new_reader->SetCurrentMediaType(
+                        video_stream_, nullptr, vmt.get())))
+                    break;
+            }
+        }
+    }
+
+    // Re-set audio output format
+    if (has_audio_) {
+        ComPtr<IMFMediaType> amt;
+        if (SUCCEEDED(MFCreateMediaType(&amt))) {
+            amt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+            amt->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+            amt->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, ai_.sample_rate);
+            amt->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, ai_.channels);
+            amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, ai_.bits_per_sample);
+            new_reader->SetCurrentMediaType(audio_stream_, nullptr, amt.get());
+        }
+    }
+
+    // Release old reader — byte stream still has our extra reference
+    reader_.reset();
+    reader_ = std::move(new_reader);
+
+    // Release extra reference — new reader now holds its own reference
+    bs->Release();
+
+    LOG_INFO("Source reader recreated successfully");
+    return reader_.get();
+}
+
 bool MediaSource::OpenHls(const wchar_t* url) {
     hls_ = new (std::nothrow) HlsManager();
     if (!hls_) {

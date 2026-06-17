@@ -108,6 +108,7 @@ private:
     std::atomic<double> pause_start_{0};
     std::atomic<bool> live_restarting_{false};
     std::atomic<double> last_video_frame_time_{0};
+    std::atomic<double> last_restart_time_{0};
 
     // Async open (background thread)
     std::thread open_thread_;

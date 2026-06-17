@@ -180,9 +180,9 @@ ULONG HlsByteStream::CopyFromSegmentsLocked(BYTE* pb, ULONG cb) {
 
 
 
-/* Sync read: copy from segments under lock. Returns S_OK even with 0 bytes
- * when data is absent but EOS not signaled — MF will retry
- * (S_FALSE would trigger MF_SOURCE_READERF_ENDOFSTREAM). */
+/* Sync read: copy from segments under lock.
+ * When no data is available, waits up to 2 seconds for new data to arrive.
+ * This prevents MF from seeing 0 bytes and setting internal EOF state. */
 STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
     if (!pb) return E_POINTER;
 
@@ -199,20 +199,30 @@ STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
     }
 
     LeaveCriticalSection(&lock_);
+
+    // If no data available, wait for new data (up to 2 seconds)
+    // This prevents MF from seeing 0 bytes and setting internal EOF
+    if (total_read == 0) {
+        for (int i = 0; i < 20; i++) {
+            SwitchToThread();
+            Sleep(100);
+            EnterCriticalSection(&lock_);
+            if (closed_) { LeaveCriticalSection(&lock_); break; }
+            total_read = CopyFromSegmentsLocked(pb, cb);
+            LeaveCriticalSection(&lock_);
+            if (total_read > 0) break;
+        }
+    }
+
     if (pcbRead) *pcbRead = total_read;
-    LOG_DEBUG("HlsBS: Read(%u) -> %lu bytes, S_OK", cb, total_read);
     if (total_read > 0) return S_OK;
-    // No data available but no EOS — brief yield to avoid MF tight loop
-    SwitchToThread(); // yield instead of sleeping
+    // Still no data after wait — return 0 bytes (MF will retry)
     return S_OK;
 }
 
-/* Async read: always complete immediately via callback. Never return E_PENDING
- * — MF's TS demuxer blocks forever during initial probing if E_PENDING is
- * returned, because it waits for a callback that never comes. For 0 bytes
- * without EOS, use S_OK (not S_FALSE) so MF does not treat it as end-of-stream
- * during playback. MF serializes BeginRead calls, so async_result_/async_hr_
- * are safe to use without queuing. */
+/* Async read: always complete immediately via callback. Never return E_PENDING.
+ * When no data is available, waits up to 2 seconds for new data to arrive.
+ * This prevents MF from seeing 0 bytes and setting internal EOF state. */
 STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCallback, IUnknown* pState) {
     if (!pb || !pCallback) return E_POINTER;
 
@@ -220,16 +230,29 @@ STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCal
     if (closed_) { LeaveCriticalSection(&lock_); return E_ABORT; }
     ULONG bytesRead = CopyFromSegmentsLocked(pb, cb);
     bool is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
+
+    // If no data and no EOS, wait for new data (up to 2 seconds)
+    if (bytesRead == 0 && !is_eos) {
+        LeaveCriticalSection(&lock_);
+        for (int i = 0; i < 20; i++) {
+            SwitchToThread();
+            Sleep(100);
+            EnterCriticalSection(&lock_);
+            if (closed_) { LeaveCriticalSection(&lock_); break; }
+            bytesRead = CopyFromSegmentsLocked(pb, cb);
+            is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
+            LeaveCriticalSection(&lock_);
+            if (bytesRead > 0 || is_eos) break;
+        }
+        // Re-acquire lock to set async result
+        EnterCriticalSection(&lock_);
+    }
+
     async_result_.store(bytesRead, std::memory_order_release);
     async_hr_.store(is_eos ? S_FALSE : S_OK, std::memory_order_release);
     LeaveCriticalSection(&lock_);
 
     LOG_DEBUG("HlsBS: BeginRead(%u) -> %lu bytes (eos=%d)", cb, bytesRead, is_eos);
-
-    // Yield CPU when no data available — prevents MF tight-loop during
-    // source reader creation if TS demuxer polls BeginRead rapidly.
-    if (bytesRead == 0 && !is_eos)
-        SwitchToThread();
 
     ComPtr<IMFAsyncResult> result;
     if (SUCCEEDED(MFCreateAsyncResult(nullptr, pCallback, pState, &result))) {
@@ -271,14 +294,10 @@ STDMETHODIMP HlsByteStream::Seek(MFBYTESTREAM_SEEK_ORIGIN SeekOrigin, LONGLONG l
 STDMETHODIMP HlsByteStream::Flush() { return S_OK; }
 
 STDMETHODIMP HlsByteStream::Close() {
-    EnterCriticalSection(&lock_);
-    closed_ = true;
-    segs_.clear();
-    total_bytes_ = 0;
-    read_pos_ = 0;
-    has_eos_marker_ = false;
-    end_of_stream_ = false;
-    LeaveCriticalSection(&lock_);
+    LOG_WARN("HlsBS: Close() called — total_bytes was %lld", total_bytes_.load());
+    // Do NOT set closed_ = true here — MF calls Close() during source reader release,
+    // which would prevent the new source reader from reading.
+    // Data and cleanup are handled by Clear() during normal shutdown.
     return S_OK;
 }
 
@@ -307,6 +326,7 @@ bool HlsByteStream::HasUnreadData() const {
 }
 
 void HlsByteStream::Clear() {
+    LOG_WARN("HlsBS: Clear() called — total_bytes was %lld", total_bytes_.load());
     EnterCriticalSection(&lock_);
     segs_.clear();
     total_bytes_ = 0;
@@ -314,6 +334,18 @@ void HlsByteStream::Clear() {
     has_eos_marker_ = false;
     end_of_stream_ = false;
     LeaveCriticalSection(&lock_);
+}
+
+void HlsByteStream::ResetForRestart() {
+    EnterCriticalSection(&lock_);
+    segs_.clear();
+    total_bytes_ = 0;
+    read_pos_ = 0;
+    has_eos_marker_ = false;
+    end_of_stream_ = false;
+    needs_wake_.store(0, std::memory_order_release);
+    LeaveCriticalSection(&lock_);
+    LOG_INFO("HlsBS: ResetForRestart — cleared all data, download thread will refill");
 }
 
 void HlsByteStream::SetEndOfStream() {
@@ -634,7 +666,7 @@ bool HlsManager::Open(const wchar_t* url) {
         LOG_CRITICAL("Out of memory: HlsByteStream");
         return false;
     }
-    byte_stream_->SetCacheData(!is_live_);  // VOD: keep data for seek-back
+    byte_stream_->SetCacheData(true);  // Keep data to prevent EOF stall
 
     // Synchronous pre-buffer: download first 3 segments so MF can probe TS
     // container format from the byte stream before source reader creation.
@@ -846,4 +878,13 @@ void HlsManager::Close() {
 
 HlsByteStream* HlsManager::GetByteStream() {
     return byte_stream_;
+}
+
+void HlsManager::ResetDownloadState() {
+    LOG_INFO("HLS: Resetting download state for pipeline restart");
+    next_segment_to_download_.store(0, std::memory_order_release);
+    consumed_up_to_.store(0, std::memory_order_release);
+    eos_sent_ = false;
+    // Wake download thread to start re-downloading
+    if (wake_event_) SetEvent(wake_event_);
 }

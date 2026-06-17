@@ -28,6 +28,9 @@ public:
     // Get the byte stream (creates on first call)
     class HlsByteStream* GetByteStream();
 
+    // Reset download state for source reader recreation
+    void ResetDownloadState();
+
 private:
     friend struct HlsManagerTest;
 
@@ -90,6 +93,7 @@ public:
     void AddSegment(std::vector<uint8_t> data);
     void SetEndOfStream();
     void Clear();
+    void ResetForRestart();  // Clear data + reset position for source reader recreation
     void SetCacheData(bool cache) { cache_data_ = cache; }
     bool CheckAndClearNeedsWake();
     bool HasUnreadData() const;

@@ -51,6 +51,9 @@ public:
     // Re-read video format after media type change
     void ReconfigureVideo();
 
+    // Recreate source reader from byte stream (for live HLS restart)
+    IMFSourceReader* RecreateReader(IMFSourceReaderCallback* callback);
+
     // For live HLS: check if new data arrived after pipeline stalled
     bool HasNewHlsData();
     bool HlsByteStreamHasData();
