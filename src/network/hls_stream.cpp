@@ -236,25 +236,23 @@ STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCal
     ULONG bytesRead = CopyFromSegmentsLocked(pb, cb);
     bool is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
 
-    // Wait for data if we got nothing, OR if we got a short read (less than
-    // requested) and no EOS marker. Short reads cause MF's TS demuxer to
-    // signal EOF prematurely at segment boundaries.
-    while (bytesRead < cb && !is_eos && !closed_) {
+    // Wait for data only when we got nothing (bytesRead == 0) and no EOS.
+    // Do NOT wait on short reads — video demuxer needs data immediately,
+    // and the TS demuxer handles short reads at segment boundaries fine.
+    if (bytesRead == 0 && !is_eos && !closed_) {
         ResetEvent(data_event_);
         LeaveCriticalSection(&lock_);
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < 300; i++) {
             WaitForSingleObject(data_event_, 200);
             EnterCriticalSection(&lock_);
             if (closed_) { LeaveCriticalSection(&lock_); break; }
-            ULONG prev = bytesRead;
-            bytesRead += CopyFromSegmentsLocked(pb + bytesRead, cb - bytesRead);
+            bytesRead = CopyFromSegmentsLocked(pb, cb);
             is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
             LeaveCriticalSection(&lock_);
-            if (bytesRead >= cb || is_eos) break;
-            if (bytesRead == prev) ResetEvent(data_event_);
+            if (bytesRead > 0 || is_eos) break;
+            ResetEvent(data_event_);
         }
         EnterCriticalSection(&lock_);
-        break;
     }
 
     async_result_.store(bytesRead, std::memory_order_release);
