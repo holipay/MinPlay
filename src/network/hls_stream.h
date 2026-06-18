@@ -94,6 +94,7 @@ public:
     void SetEndOfStream();
     void Clear();
     void ResetForRestart();  // Clear data + reset position for source reader recreation
+    void DiscardConsumedData();  // Remove segments before current read_pos_ (for live restart)
     void SetCacheData(bool cache) { cache_data_ = cache; }
     bool CheckAndClearNeedsWake();
     bool HasUnreadData() const;

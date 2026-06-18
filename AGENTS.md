@@ -70,7 +70,7 @@ HLS streaming works (live and VOD):
 - HlsByteStream `Read`/`BeginRead` wait up to 2s for data before returning 0 bytes — prevents MF from setting internal EOF state
 - EOF handler calls `SetCurrentPosition(0)` + `ReadSample` to attempt clearing MF's internal EOF state
 - `needs_wake_` mechanism for live pipeline restart: if pipeline stalls, `AddSegment` sets flag; player timers check `HasNewHlsData()` and flush/reset as needed
-- Stall-based restart: 3s stall timeout, 5s cooldown. RecreateReader creates new source reader from existing byte stream data. `Close()` is a no-op to prevent MF from clearing data during source reader release. **Known issue**: new reader starts from position 0, replays old segments before reaching new data.
+- Stall-based restart: 3s stall timeout, 5s cooldown. `RecreateReader` calls `DiscardConsumedData()` on the byte stream before creating a new source reader — removes all segments fully consumed by the old reader, shifts remaining offsets to start from 0, and resets `read_pos_` to 0. New reader only sees unread data (at most one segment of overlap with old data).
 
 WASAPI audio is working (MP4, WAV, HLS):
 - Callback writes audio directly to ring buffer (bypasses main thread)

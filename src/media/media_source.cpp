@@ -236,6 +236,9 @@ IMFSourceReader* MediaSource::RecreateReader(IMFSourceReaderCallback* callback) 
     HlsByteStream* bs = hls_->GetByteStream();
     bs->AddRef();
 
+    // Discard old consumed segments so the new reader doesn't replay them
+    bs->DiscardConsumedData();
+
     // Create new attributes
     ComPtr<IMFAttributes> sattrs;
     HRESULT hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);

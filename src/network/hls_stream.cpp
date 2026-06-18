@@ -348,6 +348,62 @@ void HlsByteStream::ResetForRestart() {
     LOG_INFO("HlsBS: ResetForRestart — cleared all data, download thread will refill");
 }
 
+/*
+ * Discard segments that have already been fully consumed by MF.
+ * This is used before recreating the source reader for live HLS restart
+ * so the new reader only sees new (unread) data instead of replaying
+ * old segments from position 0.
+ *
+ * After discarding, read_pos_ is reset to 0 and remaining segment offsets
+ * are shifted so the byte stream starts fresh from the first unread byte.
+ */
+void HlsByteStream::DiscardConsumedData() {
+    EnterCriticalSection(&lock_);
+
+    int64_t pos = read_pos_.load(std::memory_order_relaxed);
+    if (pos <= 0 || segs_.empty()) {
+        LeaveCriticalSection(&lock_);
+        LOG_DEBUG("HlsBS: DiscardConsumedData — nothing to discard (pos=%lld, segs=%zu)", pos, segs_.size());
+        return;
+    }
+
+    // Find first segment that contains or is after read_pos_
+    size_t keep_from = 0;
+    while (keep_from < segs_.size()) {
+        auto& s = segs_[keep_from];
+        if (s.offset + (int64_t)s.data.size() > pos) {
+            // This segment has unread data — keep it
+            break;
+        }
+        keep_from++;
+    }
+
+    if (keep_from == 0) {
+        LeaveCriticalSection(&lock_);
+        LOG_DEBUG("HlsBS: DiscardConsumedData — no segments to discard");
+        return;
+    }
+
+    int64_t discard_bytes = (keep_from < segs_.size()) ? segs_[keep_from].offset : total_bytes_.load(std::memory_order_relaxed);
+
+    // Shift remaining segments' offsets to start from 0
+    int64_t new_offset = 0;
+    for (size_t i = keep_from; i < segs_.size(); i++) {
+        segs_[i].offset = new_offset;
+        new_offset += segs_[i].data.size();
+    }
+
+    // Erase consumed segments
+    segs_.erase(segs_.begin(), segs_.begin() + keep_from);
+
+    total_bytes_.store(new_offset, std::memory_order_relaxed);
+    read_pos_ = 0;
+
+    LeaveCriticalSection(&lock_);
+    LOG_INFO("HlsBS: DiscardConsumedData — discarded %zu segments (%lld bytes), %zu segments remaining, total_bytes=%lld",
+             keep_from, discard_bytes, segs_.size(), new_offset);
+}
+
 void HlsByteStream::SetEndOfStream() {
     EnterCriticalSection(&lock_);
     has_eos_marker_ = true;
