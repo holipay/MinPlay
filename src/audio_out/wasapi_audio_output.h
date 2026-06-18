@@ -28,6 +28,11 @@ public:
     void Resume() override;
     void Reset() override;
 
+    void SetVolume(float vol) override;
+    float GetVolume() const override { return volume_.load(std::memory_order_relaxed); }
+    void SetMuted(bool m) override { muted_.store(m, std::memory_order_release); }
+    bool IsMuted() const override { return muted_.load(std::memory_order_acquire); }
+
 private:
     static constexpr int RING_SIZE = 4 * 1024 * 1024;
 
@@ -77,6 +82,8 @@ private:
     std::atomic<int64_t> total_bytes_written_{0};
     std::atomic<double> last_write_pts_{0.0};
     std::atomic<int64_t> dropped_frames_{0};
+    std::atomic<float> volume_{1.0f};
+    std::atomic<bool> muted_{false};
 
     friend struct AudioTest;
     int RingAvail() const;

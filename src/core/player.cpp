@@ -345,6 +345,56 @@ double Player::GetPosition() const {
     return pos < 0 ? 0 : pos;
 }
 
+void Player::SetVolume(float vol) {
+    if (ao_) ao_->SetVolume(vol);
+}
+
+float Player::GetVolume() const {
+    return ao_ ? ao_->GetVolume() : 1.0f;
+}
+
+void Player::ToggleMute() {
+    if (ao_) ao_->SetMuted(!ao_->IsMuted());
+}
+
+bool Player::IsMuted() const {
+    return ao_ ? ao_->IsMuted() : false;
+}
+
+void Player::ToggleFullscreen() {
+    if (!hwnd_) return;
+
+    if (is_fullscreen_) {
+        // Exit fullscreen
+        SetWindowLong(hwnd_, GWL_STYLE, saved_style_ | WS_VISIBLE);
+        SetWindowLong(hwnd_, GWL_EXSTYLE, saved_ex_style_);
+        SetWindowPlacement(hwnd_, &saved_wpl_);
+        ShowCursor(TRUE);
+        is_fullscreen_ = false;
+    } else {
+        // Enter fullscreen
+        GetWindowPlacement(hwnd_, &saved_wpl_);
+        saved_style_ = GetWindowLong(hwnd_, GWL_STYLE);
+        saved_ex_style_ = GetWindowLong(hwnd_, GWL_EXSTYLE);
+
+        SetWindowLong(hwnd_, GWL_STYLE,
+            (saved_style_ & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX))
+            | WS_POPUP | WS_VISIBLE);
+        SetWindowLong(hwnd_, GWL_EXSTYLE, saved_ex_style_ | WS_EX_TOPMOST);
+
+        MONITORINFO mi = { sizeof(mi) };
+        HMONITOR hmon = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+        if (GetMonitorInfo(hmon, &mi)) {
+            RECT r = mi.rcMonitor;
+            SetWindowPos(hwnd_, HWND_TOPMOST,
+                r.left, r.top, r.right - r.left, r.bottom - r.top,
+                SWP_FRAMECHANGED);
+        }
+        ShowCursor(FALSE);
+        is_fullscreen_ = true;
+    }
+}
+
 void Player::Resize(int w, int h) {
     win_w_ = w;
     win_h_ = h;
@@ -357,7 +407,9 @@ void Player::Paint(HDC hdc, int /*w*/, int /*h*/) {
 void Player::DrawOSD(HDC hdc) {
     if (osd_) {
         osd_->Draw(hdc, GetPosition(), GetDuration(),
-                   (int)video_fps_.load(std::memory_order_relaxed));
+                   (int)video_fps_.load(std::memory_order_relaxed),
+                   ao_ ? ao_->GetVolume() : 1.0f,
+                   ao_ ? ao_->IsMuted() : false);
     }
 }
 

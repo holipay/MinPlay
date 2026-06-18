@@ -16,4 +16,9 @@ public:
     virtual void Reset() = 0;
     virtual int GetBytesPerSec() const = 0;
     virtual int GetInputByteRate() const = 0;
+
+    virtual void SetVolume(float /*vol*/) {}
+    virtual float GetVolume() const { return 1.0f; }
+    virtual void SetMuted(bool /*m*/) {}
+    virtual bool IsMuted() const { return false; }
 };

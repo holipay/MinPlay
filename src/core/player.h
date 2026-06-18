@@ -48,6 +48,13 @@ public:
     void PauseToggle();
     void Seek(double seconds);
 
+    void SetVolume(float vol);
+    float GetVolume() const;
+    void ToggleMute();
+    bool IsMuted() const;
+    void ToggleFullscreen();
+    bool IsFullscreen() const { return is_fullscreen_; }
+
     void Resize(int w, int h);
     void Paint(HDC hdc, int w, int h);
     void DrawOSD(HDC hdc);
@@ -100,6 +107,7 @@ private:
     bool has_video_ = false;
     bool has_audio_ = false;
     bool is_network_ = false;
+    bool is_fullscreen_ = false;
     int audio_bytes_per_sec_ = 0;
     std::atomic<double> video_fps_{30.0};
 
@@ -146,6 +154,11 @@ private:
     mutable int finished_debounce_ = 0;
     int win_w_ = 0;
     int win_h_ = 0;
+
+    // Fullscreen state
+    WINDOWPLACEMENT saved_wpl_{};
+    DWORD saved_style_ = 0;
+    DWORD saved_ex_style_ = 0;
 
     static double GetTimeSec(const LARGE_INTEGER& freq);
     double ElapsedSec() const;

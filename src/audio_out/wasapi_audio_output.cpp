@@ -141,6 +141,13 @@ void WasapiAudioOutput::FillBuffer(BYTE* out, int out_frames) {
         ring_tail_.store((ring_tail_.load(std::memory_order_relaxed) + to_advance * in_fb) % ring_size_, std::memory_order_release);
     resample_frac_ = pos - consumed;
 
+    // Apply volume and mute
+    float vol = muted_.load(std::memory_order_acquire) ? 0.0f : volume_.load(std::memory_order_acquire);
+    if (vol != 1.0f) {
+        for (int i = 0; i < written * out_ch; i++)
+            out_f[i] *= vol;
+    }
+
     if (written < out_frames)
         memset(out_f + written * out_ch, 0, (out_frames - written) * out_ch * sizeof(float));
 }
@@ -400,4 +407,10 @@ void WasapiAudioOutput::Reset() {
 
     // Restart audio engine — playback thread resumes naturally
     if (client_) client_->Start();
+}
+
+void WasapiAudioOutput::SetVolume(float vol) {
+    if (vol < 0.0f) vol = 0.0f;
+    if (vol > 1.0f) vol = 1.0f;
+    volume_.store(vol, std::memory_order_release);
 }

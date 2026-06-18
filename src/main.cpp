@@ -28,6 +28,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_ERASEBKGND:
             return 1;
 
+        case WM_LBUTTONDOWN:
+            if (g_player) g_player->PauseToggle();
+            break;
+
+        case WM_LBUTTONDBLCLK:
+            if (g_player) g_player->ToggleFullscreen();
+            break;
+
+        case WM_MOUSEWHEEL:
+            if (g_player) {
+                int delta = GET_WHEEL_DELTA_WPARAM(wp);
+                float vol = g_player->GetVolume() + (delta > 0 ? 0.05f : -0.05f);
+                if (vol > 1.0f) vol = 1.0f;
+                if (vol < 0.0f) vol = 0.0f;
+                g_player->SetVolume(vol);
+            }
+            break;
+
         case WM_SIZE: {
             int nw = LOWORD(lp), nh = HIWORD(lp);
             if (g_player) {
@@ -55,8 +73,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     g_player->Seek(dur > 0 && pos > dur ? dur : pos);
                     break;
                 }
+                case VK_UP: {
+                    float vol = g_player->GetVolume() + 0.05f;
+                    if (vol > 1.0f) vol = 1.0f;
+                    g_player->SetVolume(vol);
+                    break;
+                }
+                case VK_DOWN: {
+                    float vol = g_player->GetVolume() - 0.05f;
+                    if (vol < 0.0f) vol = 0.0f;
+                    g_player->SetVolume(vol);
+                    break;
+                }
+                case 'M':
+                    g_player->ToggleMute();
+                    break;
+                case VK_F11:
+                    g_player->ToggleFullscreen();
+                    break;
                 case VK_ESCAPE:
-                    DestroyWindow(hwnd);
+                    if (g_player->IsFullscreen())
+                        g_player->ToggleFullscreen();
+                    else
+                        DestroyWindow(hwnd);
                     break;
             }
             break;
@@ -172,7 +211,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     }
 
     WNDCLASSEX wc = {sizeof(wc)};
-    wc.style         = CS_HREDRAW | CS_VREDRAW;
+    wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = GetModuleHandle(nullptr);
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);

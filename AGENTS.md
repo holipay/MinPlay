@@ -88,6 +88,13 @@ Video rendering is optimized:
 - Network streams target 15 buffered frames vs 1 for local (VQ_SIZE=32)
 - OSD overlay drawn via GDI on D3D11 back buffer (requires `DXGI_SWAP_EFFECT_DISCARD` for GDI interop)
 
+User interaction (v0.1.0):
+- Mouse: single-click pause/play, double-click fullscreen, scroll wheel volume ±5%
+- Keyboard: Space pause, Left/Right seek ±10s, Up/Down volume ±5%, M mute, F11 fullscreen, ESC exit fullscreen/quit
+- Fullscreen: saves/restores window style and position, hides cursor
+- Volume: 0-100% range, applied in WASAPI FillBuffer after resampling
+- OSD: shows volume bar when not at 100%, shows MUTE indicator
+
 ## Security
 
 ### Input validation
