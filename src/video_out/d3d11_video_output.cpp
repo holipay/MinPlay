@@ -349,6 +349,10 @@ void D3D11VideoOutput::Resize(int w, int h) {
     if (win_w_ == w && win_h_ == h && !was_iconic_) return;
     was_iconic_ = false;
 
+    // Flush GPU before ResizeBuffers — prevents DXGI_ERROR_INVALID_CALL
+    // when back buffer is still referenced by pending rendering.
+    if (ctx_) ctx_->Flush();
+
     HRESULT hr = swap_->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         LOG_WARN("D3D11 device lost during Resize — releasing resources");
