@@ -61,21 +61,62 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_KEYDOWN:
             if (!g_player) break;
-            switch (wp) {
+            {
+                // Check for Ctrl modifier
+                bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                switch (wp) {
+                // Playback control
                 case VK_SPACE:
                     g_player->PauseToggle();
                     break;
+                case 'f':
+                    g_player->ToggleFullscreen();
+                    break;
+                case 'F':
+                    g_player->ToggleFullscreen();
+                    break;
+                case 'q':
+                    DestroyWindow(hwnd);
+                    break;
+                case 'Q':
+                    DestroyWindow(hwnd);
+                    break;
+
+                // Progress control
                 case VK_LEFT: {
-                    double pos = g_player->GetPosition() - 10.0;
+                    double step = ctrl ? 600.0 : 10.0;
+                    double pos = g_player->GetPosition() - step;
                     g_player->Seek(pos < 0 ? 0 : pos);
                     break;
                 }
                 case VK_RIGHT: {
-                    double pos = g_player->GetPosition() + 10.0;
+                    double step = ctrl ? 600.0 : 10.0;
+                    double pos = g_player->GetPosition() + step;
                     double dur = g_player->GetDuration();
                     g_player->Seek(dur > 0 && pos > dur ? dur : pos);
                     break;
                 }
+                case VK_PRIOR: { // Page Up
+                    double pos = g_player->GetPosition() - 60.0;
+                    g_player->Seek(pos < 0 ? 0 : pos);
+                    break;
+                }
+                case VK_NEXT: { // Page Down
+                    double pos = g_player->GetPosition() + 60.0;
+                    double dur = g_player->GetDuration();
+                    g_player->Seek(dur > 0 && pos > dur ? dur : pos);
+                    break;
+                }
+                case VK_HOME:
+                    g_player->Seek(0);
+                    break;
+                case VK_END: {
+                    double dur = g_player->GetDuration();
+                    g_player->Seek(dur > 0 ? dur : 0);
+                    break;
+                }
+
+                // Volume control
                 case VK_UP: {
                     float vol = g_player->GetVolume() + 0.05f;
                     if (vol > 1.0f) vol = 1.0f;
@@ -88,9 +129,37 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     g_player->SetVolume(vol);
                     break;
                 }
+                case '0': {
+                    float vol = g_player->GetVolume() - 0.10f;
+                    if (vol < 0.0f) vol = 0.0f;
+                    g_player->SetVolume(vol);
+                    break;
+                }
+                case '9': {
+                    float vol = g_player->GetVolume() + 0.10f;
+                    if (vol > 1.0f) vol = 1.0f;
+                    g_player->SetVolume(vol);
+                    break;
+                }
+                case '+':
+                case '=': {
+                    float vol = g_player->GetVolume() + 0.01f;
+                    if (vol > 1.0f) vol = 1.0f;
+                    g_player->SetVolume(vol);
+                    break;
+                }
+                case '-': {
+                    float vol = g_player->GetVolume() - 0.01f;
+                    if (vol < 0.0f) vol = 0.0f;
+                    g_player->SetVolume(vol);
+                    break;
+                }
                 case 'M':
+                case 'm':
                     g_player->ToggleMute();
                     break;
+
+                // Fullscreen & exit
                 case VK_F11:
                     g_player->ToggleFullscreen();
                     break;
@@ -100,6 +169,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     else
                         DestroyWindow(hwnd);
                     break;
+                }
             }
             break;
 
