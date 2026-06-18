@@ -5,8 +5,8 @@ rem Usage: build.bat [release]
 rem   (no arg)  -- debug build  (/Od /Zi)
 rem   release   -- release build (/O2)
 
-set OPTFLAGS=/Od /Zi
-if /i "%1"=="release" set OPTFLAGS=/O2
+set OPTFLAGS=/Od /Zi /DCURRENT_LOG_LEVEL=1
+if /i "%1"=="release" set OPTFLAGS=/O2 /DCURRENT_LOG_LEVEL=2
 
 rem Try vswhere first (VS 2017+), fall back to default path
 set VS_PATH=
