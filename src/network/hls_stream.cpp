@@ -236,22 +236,25 @@ STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCal
     ULONG bytesRead = CopyFromSegmentsLocked(pb, cb);
     bool is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
 
-    // If no data and no EOS, wait for new data via manual-reset event
-    if (bytesRead == 0 && !is_eos) {
+    // Wait for data if we got nothing, OR if we got a short read (less than
+    // requested) and no EOS marker. Short reads cause MF's TS demuxer to
+    // signal EOF prematurely at segment boundaries.
+    while (bytesRead < cb && !is_eos && !closed_) {
         ResetEvent(data_event_);
         LeaveCriticalSection(&lock_);
-        for (int i = 0; i < 300; i++) {
+        for (int i = 0; i < 100; i++) {
             WaitForSingleObject(data_event_, 200);
             EnterCriticalSection(&lock_);
             if (closed_) { LeaveCriticalSection(&lock_); break; }
-            bytesRead = CopyFromSegmentsLocked(pb, cb);
+            ULONG prev = bytesRead;
+            bytesRead += CopyFromSegmentsLocked(pb + bytesRead, cb - bytesRead);
             is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
             LeaveCriticalSection(&lock_);
-            if (bytesRead > 0 || is_eos) break;
-            ResetEvent(data_event_);
+            if (bytesRead >= cb || is_eos) break;
+            if (bytesRead == prev) ResetEvent(data_event_);
         }
-        // Re-acquire lock to set async result
         EnterCriticalSection(&lock_);
+        break;
     }
 
     async_result_.store(bytesRead, std::memory_order_release);
@@ -332,6 +335,14 @@ bool HlsByteStream::CheckAndClearNeedsWake() {
 
 bool HlsByteStream::HasUnreadData() const {
     return read_pos_.load(std::memory_order_acquire) < total_bytes_.load(std::memory_order_acquire);
+}
+
+bool HlsByteStream::WaitForData(DWORD timeout_ms) {
+    if (HasUnreadData()) return true;
+    if (!data_event_) return false;
+    ResetEvent(data_event_);
+    (void)WaitForSingleObject(data_event_, timeout_ms);
+    return HasUnreadData();
 }
 
 void HlsByteStream::Clear() {

@@ -18,7 +18,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HDC hdc = BeginPaint(hwnd, &ps);
             RECT rc;
             GetClientRect(hwnd, &rc);
-            if (!g_player) {
+            if (g_player) {
+                g_player->DrawOSD(hdc);
+            } else {
                 FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
             }
             EndPaint(hwnd, &ps);
@@ -222,6 +224,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 KillTimer(hwnd, TIMER_CLICK_DELAY);
                 if (g_player) g_player->PauseToggle();
             }
+            if (wp == TIMER_OSD_REFRESH && g_player) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             break;
 
         case WM_OPEN_COMPLETE:
@@ -236,6 +241,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // Audio ring-buffer refill timer (Play() handles video timer internally)
             if (!SetTimer(hwnd, TIMER_AUDIO_CHECK, 50, nullptr))
                 LOG_WARN("Failed to create audio check timer");
+            // OSD refresh timer for audio-only mode (no D3D11 to drive repaints)
+            if (g_player->IsAudioOnly()) {
+                if (!SetTimer(hwnd, TIMER_OSD_REFRESH, 500, nullptr))
+                    LOG_WARN("Failed to create OSD refresh timer");
+            }
             break;
 
         case WM_RESTART_LIVE:
@@ -308,10 +318,17 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     }
 
     wchar_t url[2048] = L"test.mp4";
+    bool audio_only = false;
     int wargc = 0;
     LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
-    if (wargv && wargc > 1) {
-        wcsncpy_s(url, 2048, wargv[1], _TRUNCATE);
+    if (wargv) {
+        for (int i = 1; i < wargc; i++) {
+            if (_wcsicmp(wargv[i], L"--audio-only") == 0 || _wcsicmp(wargv[i], L"-a") == 0) {
+                audio_only = true;
+            } else {
+                wcsncpy_s(url, 2048, wargv[i], _TRUNCATE);
+            }
+        }
     }
     if (wargv) LocalFree(wargv);
 
@@ -333,7 +350,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
-    RECT rc = {0, 0, 1280, 720};
+    RECT rc = {0, 0, audio_only ? 400 : 1280, audio_only ? 120 : 720};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
     g_hwnd = CreateWindowEx(0, TEXT("MinPlay"), TEXT("MinPlay"),
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
@@ -351,7 +368,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         return 1;
     }
     SetWindowText(g_hwnd, TEXT("MinPlay - Loading..."));
-    bool open_ok = g_player->Open(g_hwnd, url);
+    bool open_ok = g_player->Open(g_hwnd, url, audio_only);
     if (!open_ok) {
         MessageBoxA(nullptr, "Failed to open media file.\nSee console for details.", "Error", MB_OK);
         delete g_player; g_player = nullptr;
@@ -370,6 +387,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     KillTimer(g_hwnd, TIMER_VIDEO_DISPLAY);
     KillTimer(g_hwnd, TIMER_EOF_CHECK);
     KillTimer(g_hwnd, TIMER_CLICK_DELAY);
+    KillTimer(g_hwnd, TIMER_OSD_REFRESH);
     delete g_player;
 
     MFShutdown();

@@ -30,7 +30,7 @@ public:
     MediaSource(const MediaSource&) = delete;
     MediaSource& operator=(const MediaSource&) = delete;
 
-    bool Open(const wchar_t* url, IMFSourceReaderCallback* callback = nullptr);
+    bool Open(const wchar_t* url, IMFSourceReaderCallback* callback = nullptr, bool audio_only = false);
     void Close();
 
     bool Seek(double seconds);

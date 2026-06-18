@@ -21,7 +21,7 @@ HRESULT MediaSource::GetUint64Pair(IMFAttributes* attr, REFGUID key,
     return hr;
 }
 
-bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
+bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback, bool audio_only) {
     ComPtr<IMFAttributes> sattrs;
     HRESULT hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
     if (FAILED(hr)) {
@@ -75,47 +75,50 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
         }
     }
 
-    ComPtr<IMFMediaType> vmt;
-    if (FAILED(MFCreateMediaType(&vmt))) {
-        LOG_ERROR("MFCreateMediaType failed");
-        return false;
-    }
-    vmt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-
-    struct { const GUID* fmt; PixelFormat pf; } fmts[] = {
-        { &MFVideoFormat_NV12,   PixelFormat::NV12  },
-        { &MFVideoFormat_I420,   PixelFormat::I420  },
-        { &MFVideoFormat_YUY2,   PixelFormat::YUY2  },
-        { &MFVideoFormat_ARGB32, PixelFormat::RGB32 },
-        { &MFVideoFormat_RGB32,  PixelFormat::RGB32 },
-    };
-
-    for (auto& f : fmts) {
-        vmt->SetGUID(MF_MT_SUBTYPE, *f.fmt);
-        hr = reader->SetCurrentMediaType(
-            (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, vmt.get());
-        if (SUCCEEDED(hr)) {
-            ComPtr<IMFMediaType> native;
-            if (FAILED(reader->GetCurrentMediaType(
-                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &native)) || !native) {
-                continue;
-            }
-            has_video_ = true;
-            pix_fmt_ = f.pf;
-            UINT32 w = 0, h = 0, num = 0, den = 0;
-            GetUint64Pair(native.get(), MF_MT_FRAME_SIZE, &w, &h);
-            GetUint64Pair(native.get(), MF_MT_FRAME_RATE, &num, &den);
-            vi_.width = (int)w;
-            vi_.height = (int)h;
-            vi_.fps = den ? (double)num / den : 30.0;
-            vi_.stride = (int)MFGetAttributeUINT32(
-                native.get(), MF_MT_DEFAULT_STRIDE, 0);
-            LOG_INFO("Video: %dx%d stride=%d @ %.1f fps (fmt=%d)",
-                     w, h, vi_.stride, vi_.fps, (int)pix_fmt_);
-            break;
+    if (!audio_only) {
+        ComPtr<IMFMediaType> vmt;
+        if (FAILED(MFCreateMediaType(&vmt))) {
+            LOG_ERROR("MFCreateMediaType failed");
+            return false;
         }
+        vmt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+
+        struct { const GUID* fmt; PixelFormat pf; } fmts[] = {
+            { &MFVideoFormat_NV12,   PixelFormat::NV12  },
+            { &MFVideoFormat_I420,   PixelFormat::I420  },
+            { &MFVideoFormat_YUY2,   PixelFormat::YUY2  },
+            { &MFVideoFormat_ARGB32, PixelFormat::RGB32 },
+            { &MFVideoFormat_RGB32,  PixelFormat::RGB32 },
+        };
+
+        for (auto& f : fmts) {
+            vmt->SetGUID(MF_MT_SUBTYPE, *f.fmt);
+            hr = reader->SetCurrentMediaType(
+                (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, vmt.get());
+            if (SUCCEEDED(hr)) {
+                ComPtr<IMFMediaType> native;
+                if (FAILED(reader->GetCurrentMediaType(
+                    (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &native)) || !native) {
+                    continue;
+                }
+                has_video_ = true;
+                pix_fmt_ = f.pf;
+                UINT32 w = 0, h = 0, num = 0, den = 0;
+                GetUint64Pair(native.get(), MF_MT_FRAME_SIZE, &w, &h);
+                GetUint64Pair(native.get(), MF_MT_FRAME_RATE, &num, &den);
+                vi_.width = (int)w;
+                vi_.height = (int)h;
+                vi_.fps = den ? (double)num / den : 30.0;
+                vi_.stride = (int)MFGetAttributeUINT32(
+                    native.get(), MF_MT_DEFAULT_STRIDE, 0);
+                LOG_INFO("Video: %dx%d stride=%d @ %.1f fps (fmt=%d)",
+                         w, h, vi_.stride, vi_.fps, (int)pix_fmt_);
+                break;
+            }
+        }
+    } else {
+        LOG_INFO("Audio-only mode: skipping video format negotiation");
     }
-    vmt.reset();
 
     ComPtr<IMFMediaType> amt;
     if (FAILED(MFCreateMediaType(&amt))) {
@@ -182,12 +185,13 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback) {
         if (FAILED(hr)) break;
         GUID maj;
         stmtype->GetGUID(MF_MT_MAJOR_TYPE, &maj);
-        if (maj == MFMediaType_Video && video_stream_ == (DWORD)-1) {
+        if (!audio_only && maj == MFMediaType_Video && video_stream_ == (DWORD)-1) {
             video_stream_ = i;
         } else if (maj == MFMediaType_Audio && audio_stream_ == (DWORD)-1) {
             audio_stream_ = i;
         }
-        if (video_stream_ != (DWORD)-1 && audio_stream_ != (DWORD)-1) break;
+        if (!audio_only && video_stream_ != (DWORD)-1 && audio_stream_ != (DWORD)-1) break;
+        if (audio_only && audio_stream_ != (DWORD)-1) break;
     }
     LOG_INFO("Streams: video=%lu audio=%lu", video_stream_, audio_stream_);
 
@@ -238,6 +242,19 @@ IMFSourceReader* MediaSource::RecreateReader(IMFSourceReaderCallback* callback) 
 
     // Discard old consumed segments so the new reader doesn't replay them
     bs->DiscardConsumedData();
+
+    // Wait for new data before creating reader — MFCreateSourceReaderFromByteStream
+    // blocks the main thread while the TS demuxer probes the byte stream.
+    // If the byte stream is empty, BeginRead blocks until data arrives.
+    if (!bs->HasUnreadData()) {
+        LOG_INFO("Waiting for new segment data...");
+        if (!bs->WaitForData(10000)) {
+            LOG_WARN("No data after 10s, aborting reader recreation");
+            bs->Release();
+            return nullptr;
+        }
+        LOG_INFO("Data available, continuing recreation");
+    }
 
     // Create new attributes
     ComPtr<IMFAttributes> sattrs;

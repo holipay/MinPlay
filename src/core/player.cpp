@@ -57,9 +57,10 @@ void Player::StopVideoTimer() {
     }
 }
 
-bool Player::Open(HWND hwnd, const wchar_t* url) {
+bool Player::Open(HWND hwnd, const wchar_t* url, bool audio_only) {
     Close();
     hwnd_ = hwnd;
+    audio_only_ = audio_only;
 
     callback_ = new (std::nothrow) SourceReaderCallback();
     if (!callback_) {
@@ -74,13 +75,13 @@ bool Player::Open(HWND hwnd, const wchar_t* url) {
     state_.store(PlayerState::Opening, std::memory_order_release);
 
     open_running_ = true;
-    open_thread_ = std::thread([this, url_str = std::wstring(url)]() {
-        OpenAsync(url_str);
+    open_thread_ = std::thread([this, url_str = std::wstring(url), audio_only]() {
+        OpenAsync(url_str, audio_only);
     });
     return true;
 }
 
-void Player::OpenAsync(std::wstring url) {
+void Player::OpenAsync(std::wstring url, bool audio_only) {
     source_ = new (std::nothrow) MediaSource();
     if (!source_) {
         LOG_CRITICAL("Out of memory: source_");
@@ -89,7 +90,7 @@ void Player::OpenAsync(std::wstring url) {
         return;
     }
 
-    if (!source_->Open(url.c_str(), callback_)) {
+    if (!source_->Open(url.c_str(), callback_, audio_only)) {
         LOG_ERROR("Failed to open media source");
         open_ok_ = false;
         PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, 0);
@@ -153,7 +154,7 @@ void Player::OpenAsync(std::wstring url) {
         }
     }
 
-    {
+    if (!audio_only) {
         D3D11VideoOutput* d3d_vo = new (std::nothrow) D3D11VideoOutput();
         if (d3d_vo) {
             if (d3d_vo->Initialize(hwnd_, win_w_, win_h_)) {
@@ -426,7 +427,7 @@ bool Player::IsFinished() const {
     {
         f_ready = frame_ready_;
     }
-    bool vdone  = !has_video_ || (callback_ && callback_->IsVideoEof() && vq_empty && !f_ready);
+    bool vdone  = audio_only_ || !has_video_ || (callback_ && callback_->IsVideoEof() && vq_empty && !f_ready);
     bool adone  = !has_audio_ || (callback_ && callback_->IsAudioEof() && ao_ && ao_->GetBuffered() == 0);
     if (vdone && adone) {
         // Debounce: require two consecutive true checks to avoid closing
@@ -479,23 +480,25 @@ void Player::TryRestartLivePipeline() {
 void Player::NotifyLiveEof() {
     if (!source_ || !source_->IsLive() || !callback_) return;
 
-    // If new data is available, restart immediately instead of waiting for stall timeout
-    if (!source_->HlsByteStreamHasData()) return;
-    if (!source_->HasNewHlsData()) return;
+    // For video: require data available before restarting.
+    // For audio-only: always restart — RecreateReader's WaitForData handles the gap.
+    if (!audio_only_) {
+        if (!source_->HlsByteStreamHasData()) return;
+        if (!source_->HasNewHlsData()) return;
+    }
+
+    // Don't post if a restart is already pending
+    if (live_restarting_.load(std::memory_order_acquire)) return;
 
     double now = GetTimeSec(perf_freq_);
 
-    // Cooldown: don't restart more than once every 3 seconds
-    double last_restart = last_restart_time_.load(std::memory_order_acquire);
-    if (last_restart > 0 && (now - last_restart) < 3.0) return;
-    last_restart_time_.store(now, std::memory_order_release);
+    if (!audio_only_) {
+        double last_restart = last_restart_time_.load(std::memory_order_acquire);
+        if (last_restart > 0 && (now - last_restart) < 2.0) return;
+        last_restart_time_.store(now, std::memory_order_release);
+    }
 
-    // Prevent concurrent restart
-    bool expected = false;
-    if (!live_restarting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
-        return;
-
-    LOG_INFO("Live: EOF with new data available, immediate restart");
+    LOG_INFO("Live: EOF, immediate restart%s", audio_only_ ? " (audio-only)" : "");
     PostMessage(hwnd_, WM_RESTART_LIVE, 0, 0);
 }
 
@@ -504,6 +507,11 @@ void Player::FlushAndRestart() {
         live_restarting_.store(false, std::memory_order_release);
         return;
     }
+
+    // Prevent concurrent restarts
+    bool expected = false;
+    if (!live_restarting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        return;
 
     LOG_INFO("Live: flushing + restarting pipeline");
     // Stop callbacks and wait for in-flight to finish
@@ -519,8 +527,10 @@ void Player::FlushAndRestart() {
     }
     frame_ready_ = false;
 
-    // Reset audio ring buffer — stale audio causes desync after restart
-    if (ao_) {
+    // For video: reset audio ring buffer to prevent desync after restart.
+    // For audio-only: skip reset — let the ring buffer drain naturally during
+    // restart so WASAPI keeps playing buffered audio, avoiding silence gap.
+    if (!audio_only_ && ao_) {
         ao_->Pause();
         ao_->Reset();
         ao_->Resume();
@@ -539,6 +549,7 @@ void Player::FlushAndRestart() {
     start_time_.store(now, std::memory_order_release);
     pause_offset_.store(0, std::memory_order_release);
     pause_start_.store(0, std::memory_order_release);
+    last_audio_data_time_.store(now, std::memory_order_release);
     if (sync_) sync_->Seek();
     video_first_frame_post_.store(1, std::memory_order_release);
     callback_->StartReading();
@@ -658,6 +669,7 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
  * VideoTick — main rendering loop (called from WM_TIMER on main thread).
  */
 void Player::VideoTick() {
+    if (audio_only_) return;
     if (state_.load(std::memory_order_acquire) != PlayerState::Playing) return;
 
     // Live HLS: if stream stalled and new data arrived, restart pipeline
@@ -785,6 +797,26 @@ void Player::CheckAudio() {
 
     // Live HLS: restart if stalled — deduplicated via TryRestartLivePipeline + atomic
     TryRestartLivePipeline();
+
+    // Audio-only HLS: fallback stall detection if NotifyLiveEof didn't trigger
+    if (audio_only_ && source_ && source_->IsLive() && callback_ &&
+        callback_->IsAudioEof()) {
+        int buffered = ao_ ? ao_->GetBuffered() : 0;
+        double now = GetTimeSec(perf_freq_);
+
+        if (buffered > 0) {
+            last_audio_data_time_.store(now, std::memory_order_release);
+        }
+
+        if (buffered == 0) {
+            double last_data = last_audio_data_time_.load(std::memory_order_acquire);
+            if (last_data > 0 && (now - last_data) >= 1.0) {
+                LOG_INFO("Audio-only live: stall fallback (no data for %.1fs)", now - last_data);
+                PostMessage(hwnd_, WM_RESTART_LIVE, 0, 0);
+                last_audio_data_time_.store(now, std::memory_order_release);
+            }
+        }
+    }
 
     if (has_audio_ && callback_ && !callback_->IsAudioEof()) {
         int buffered = ao_ ? ao_->GetBuffered() : 0;

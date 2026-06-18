@@ -95,6 +95,7 @@ public:
     void Clear();
     void ResetForRestart();  // Clear data + reset position for source reader recreation
     void DiscardConsumedData();  // Remove segments before current read_pos_ (for live restart)
+    bool WaitForData(DWORD timeout_ms);  // Wait for new data to arrive
     void SetCacheData(bool cache) { cache_data_ = cache; }
     bool CheckAndClearNeedsWake();
     bool HasUnreadData() const;

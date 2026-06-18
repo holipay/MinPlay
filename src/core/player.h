@@ -17,6 +17,7 @@
 #define TIMER_VIDEO_DISPLAY 2
 #define TIMER_EOF_CHECK     3
 #define TIMER_CLICK_DELAY   4
+#define TIMER_OSD_REFRESH   5
 #define WM_RESTART_LIVE     (WM_APP + 1)
 #define WM_OPEN_COMPLETE    (WM_APP + 2)
 
@@ -42,7 +43,7 @@ public:
     Player(const Player&) = delete;
     Player& operator=(const Player&) = delete;
 
-    bool Open(HWND hwnd, const wchar_t* url);
+    bool Open(HWND hwnd, const wchar_t* url, bool audio_only = false);
     void Close();
 
     void Play();
@@ -69,6 +70,7 @@ public:
     double GetPosition() const;
     bool HasVideo() const { return has_video_; }
     bool HasAudio() const { return has_audio_; }
+    bool IsAudioOnly() const { return audio_only_; }
     double GetVideoFps() const { return video_fps_.load(std::memory_order_relaxed); }
     bool IsFinished() const;
     void OnVideoFormatChanged();
@@ -79,7 +81,7 @@ public:
     bool IsOpenSuccessful() const { return open_ok_; }
 
 private:
-    void OpenAsync(std::wstring url);
+    void OpenAsync(std::wstring url, bool audio_only);
     void TryRestartLivePipeline();
     void StartVideoTimer();
     void StopVideoTimer();
@@ -107,6 +109,7 @@ private:
 
     bool has_video_ = false;
     bool has_audio_ = false;
+    bool audio_only_ = false;
     bool is_network_ = false;
     bool is_fullscreen_ = false;
     int audio_bytes_per_sec_ = 0;
@@ -118,6 +121,7 @@ private:
     std::atomic<double> pause_start_{0};
     std::atomic<bool> live_restarting_{false};
     std::atomic<double> last_video_frame_time_{0};
+    std::atomic<double> last_audio_data_time_{0};
     std::atomic<double> last_restart_time_{0};
 
     // Async open (background thread)
