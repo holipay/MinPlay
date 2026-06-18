@@ -16,6 +16,7 @@
 #define TIMER_AUDIO_CHECK   1
 #define TIMER_VIDEO_DISPLAY 2
 #define TIMER_EOF_CHECK     3
+#define TIMER_CLICK_DELAY   4
 #define WM_RESTART_LIVE     (WM_APP + 1)
 #define WM_OPEN_COMPLETE    (WM_APP + 2)
 

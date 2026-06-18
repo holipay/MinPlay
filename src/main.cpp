@@ -62,27 +62,47 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_KEYDOWN:
             if (!g_player) break;
             {
-                // Check for Ctrl modifier
                 bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
                 switch (wp) {
-                // Playback control
+                // Playback control (MPlayer: Space/p pause, q quit)
                 case VK_SPACE:
+                case 'p':
+                case 'P':
                     g_player->PauseToggle();
                     break;
                 case 'f':
-                    g_player->ToggleFullscreen();
-                    break;
                 case 'F':
                     g_player->ToggleFullscreen();
                     break;
                 case 'q':
-                    DestroyWindow(hwnd);
-                    break;
                 case 'Q':
                     DestroyWindow(hwnd);
                     break;
 
-                // Progress control
+                // Frame stepping (MPlayer: . forward, , backward)
+                case VK_OEM_PERIOD: { // . key
+                    if (g_player->GetState() != PlayerState::Paused)
+                        g_player->PauseToggle();
+                    double fps = g_player->GetVideoFps();
+                    if (fps > 0) {
+                        double pos = g_player->GetPosition() + 1.0 / fps;
+                        double dur = g_player->GetDuration();
+                        g_player->Seek(dur > 0 && pos > dur ? dur : pos);
+                    }
+                    break;
+                }
+                case VK_OEM_COMMA: { // , key
+                    if (g_player->GetState() != PlayerState::Paused)
+                        g_player->PauseToggle();
+                    double fps = g_player->GetVideoFps();
+                    if (fps > 0) {
+                        double pos = g_player->GetPosition() - 1.0 / fps;
+                        g_player->Seek(pos < 0 ? 0 : pos);
+                    }
+                    break;
+                }
+
+                // Seek control (MPlayer: Left/Right ±10s, Up/Down ±60s, PgUp/PgDn ±60s)
                 case VK_LEFT: {
                     double step = ctrl ? 600.0 : 10.0;
                     double pos = g_player->GetPosition() - step;
@@ -94,6 +114,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     double pos = g_player->GetPosition() + step;
                     double dur = g_player->GetDuration();
                     g_player->Seek(dur > 0 && pos > dur ? dur : pos);
+                    break;
+                }
+                case VK_UP: {
+                    double step = ctrl ? 600.0 : 60.0;
+                    double pos = g_player->GetPosition() + step;
+                    double dur = g_player->GetDuration();
+                    g_player->Seek(dur > 0 && pos > dur ? dur : pos);
+                    break;
+                }
+                case VK_DOWN: {
+                    double step = ctrl ? 600.0 : 60.0;
+                    double pos = g_player->GetPosition() - step;
+                    g_player->Seek(pos < 0 ? 0 : pos);
                     break;
                 }
                 case VK_PRIOR: { // Page Up
@@ -116,28 +149,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 }
 
-                // Volume control
-                case VK_UP: {
-                    float vol = g_player->GetVolume() + 0.05f;
+                // Volume control (MPlayer: 0 up, 9 down, / up, * down)
+                case '0': {
+                    float vol = g_player->GetVolume() + 0.10f;
                     if (vol > 1.0f) vol = 1.0f;
                     g_player->SetVolume(vol);
                     break;
                 }
-                case VK_DOWN: {
-                    float vol = g_player->GetVolume() - 0.05f;
-                    if (vol < 0.0f) vol = 0.0f;
-                    g_player->SetVolume(vol);
-                    break;
-                }
-                case '0': {
+                case '9': {
                     float vol = g_player->GetVolume() - 0.10f;
                     if (vol < 0.0f) vol = 0.0f;
                     g_player->SetVolume(vol);
                     break;
                 }
-                case '9': {
+                case VK_OEM_2: { // / key — volume up
                     float vol = g_player->GetVolume() + 0.10f;
                     if (vol > 1.0f) vol = 1.0f;
+                    g_player->SetVolume(vol);
+                    break;
+                }
+                case VK_MULTIPLY: { // * key — volume down
+                    float vol = g_player->GetVolume() - 0.10f;
+                    if (vol < 0.0f) vol = 0.0f;
                     g_player->SetVolume(vol);
                     break;
                 }
@@ -154,8 +187,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     g_player->SetVolume(vol);
                     break;
                 }
-                case 'M':
                 case 'm':
+                case 'M':
                     g_player->ToggleMute();
                     break;
 
