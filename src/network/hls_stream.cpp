@@ -60,10 +60,12 @@ static std::wstring Utf8ToWide(const std::string& utf8) {
  */
 HlsByteStream::HlsByteStream() {
     InitializeCriticalSection(&lock_);
+    data_event_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);  // manual-reset
 }
 
 HlsByteStream::~HlsByteStream() {
     Clear();
+    if (data_event_) CloseHandle(data_event_);
     DeleteCriticalSection(&lock_);
 }
 
@@ -181,7 +183,7 @@ ULONG HlsByteStream::CopyFromSegmentsLocked(BYTE* pb, ULONG cb) {
 
 
 /* Sync read: copy from segments under lock.
- * When no data is available, waits up to 2 seconds for new data to arrive.
+ * When no data is available, waits on data_event_ (signaled by AddSegment).
  * This prevents MF from seeing 0 bytes and setting internal EOF state. */
 STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
     if (!pb) return E_POINTER;
@@ -198,30 +200,33 @@ STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
         return S_FALSE;
     }
 
-    LeaveCriticalSection(&lock_);
-
-    // If no data available, wait for new data (up to 2 seconds)
-    // This prevents MF from seeing 0 bytes and setting internal EOF
+    // If no data available, wait for new data via manual-reset event
     if (total_read == 0) {
-        for (int i = 0; i < 20; i++) {
-            SwitchToThread();
-            Sleep(100);
+        ResetEvent(data_event_);
+        LeaveCriticalSection(&lock_);
+        for (int i = 0; i < 300; i++) {
+            WaitForSingleObject(data_event_, 200);
             EnterCriticalSection(&lock_);
             if (closed_) { LeaveCriticalSection(&lock_); break; }
             total_read = CopyFromSegmentsLocked(pb, cb);
             LeaveCriticalSection(&lock_);
             if (total_read > 0) break;
+            // Re-check EOS after wait
+            EnterCriticalSection(&lock_);
+            bool eos = (has_eos_marker_ && read_pos_ >= total_bytes_);
+            LeaveCriticalSection(&lock_);
+            if (eos) break;
+            ResetEvent(data_event_);
         }
     }
 
     if (pcbRead) *pcbRead = total_read;
     if (total_read > 0) return S_OK;
-    // Still no data after wait — return 0 bytes (MF will retry)
     return S_OK;
 }
 
 /* Async read: always complete immediately via callback. Never return E_PENDING.
- * When no data is available, waits up to 2 seconds for new data to arrive.
+ * When no data is available, waits on data_event_ (signaled by AddSegment).
  * This prevents MF from seeing 0 bytes and setting internal EOF state. */
 STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCallback, IUnknown* pState) {
     if (!pb || !pCallback) return E_POINTER;
@@ -231,18 +236,19 @@ STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCal
     ULONG bytesRead = CopyFromSegmentsLocked(pb, cb);
     bool is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
 
-    // If no data and no EOS, wait for new data (up to 2 seconds)
+    // If no data and no EOS, wait for new data via manual-reset event
     if (bytesRead == 0 && !is_eos) {
+        ResetEvent(data_event_);
         LeaveCriticalSection(&lock_);
-        for (int i = 0; i < 20; i++) {
-            SwitchToThread();
-            Sleep(100);
+        for (int i = 0; i < 300; i++) {
+            WaitForSingleObject(data_event_, 200);
             EnterCriticalSection(&lock_);
             if (closed_) { LeaveCriticalSection(&lock_); break; }
             bytesRead = CopyFromSegmentsLocked(pb, cb);
             is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
             LeaveCriticalSection(&lock_);
             if (bytesRead > 0 || is_eos) break;
+            ResetEvent(data_event_);
         }
         // Re-acquire lock to set async result
         EnterCriticalSection(&lock_);
@@ -315,6 +321,9 @@ void HlsByteStream::AddSegment(std::vector<uint8_t> data) {
     needs_wake_.store(1, std::memory_order_release);
 
     LeaveCriticalSection(&lock_);
+
+    // Wake up any blocked BeginRead/Read waiting for data
+    if (data_event_) SetEvent(data_event_);
 }
 
 bool HlsByteStream::CheckAndClearNeedsWake() {
@@ -334,6 +343,7 @@ void HlsByteStream::Clear() {
     has_eos_marker_ = false;
     end_of_stream_ = false;
     LeaveCriticalSection(&lock_);
+    if (data_event_) ResetEvent(data_event_);
 }
 
 void HlsByteStream::ResetForRestart() {
@@ -345,6 +355,7 @@ void HlsByteStream::ResetForRestart() {
     end_of_stream_ = false;
     needs_wake_.store(0, std::memory_order_release);
     LeaveCriticalSection(&lock_);
+    if (data_event_) ResetEvent(data_event_);
     LOG_INFO("HlsBS: ResetForRestart — cleared all data, download thread will refill");
 }
 

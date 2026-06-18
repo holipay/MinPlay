@@ -169,6 +169,7 @@ void Player::OpenAsync(std::wstring url) {
     }
 
     callback_->SetPlayer(this);
+    callback_->SetLive(source_->IsLive());
     callback_->SetReader(source_->GetReader(),
                           source_->GetVideoStream(),
                           source_->GetAudioStream());
@@ -423,6 +424,29 @@ void Player::TryRestartLivePipeline() {
     PostMessage(hwnd_, WM_RESTART_LIVE, 0, 0);
 }
 
+void Player::NotifyLiveEof() {
+    if (!source_ || !source_->IsLive() || !callback_) return;
+
+    // If new data is available, restart immediately instead of waiting for stall timeout
+    if (!source_->HlsByteStreamHasData()) return;
+    if (!source_->HasNewHlsData()) return;
+
+    double now = GetTimeSec(perf_freq_);
+
+    // Cooldown: don't restart more than once every 3 seconds
+    double last_restart = last_restart_time_.load(std::memory_order_acquire);
+    if (last_restart > 0 && (now - last_restart) < 3.0) return;
+    last_restart_time_.store(now, std::memory_order_release);
+
+    // Prevent concurrent restart
+    bool expected = false;
+    if (!live_restarting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        return;
+
+    LOG_INFO("Live: EOF with new data available, immediate restart");
+    PostMessage(hwnd_, WM_RESTART_LIVE, 0, 0);
+}
+
 void Player::FlushAndRestart() {
     if (state_.load(std::memory_order_acquire) != PlayerState::Playing) {
         live_restarting_.store(false, std::memory_order_release);
@@ -434,6 +458,21 @@ void Player::FlushAndRestart() {
     callback_->Stop();
     callback_->ResetVideoEof();
     callback_->ResetAudioEof();
+
+    // Clear video queue — stale frames cause fast playback after restart
+    {
+        std::lock_guard<std::mutex> lock(vq_mutex_);
+        vq_head_ = 0;
+        vq_tail_ = 0;
+    }
+    frame_ready_ = false;
+
+    // Reset audio ring buffer — stale audio causes desync after restart
+    if (ao_) {
+        ao_->Pause();
+        ao_->Reset();
+        ao_->Resume();
+    }
 
     // Recreate source reader to clear MF's internal EOF state
     IMFSourceReader* new_reader = source_->RecreateReader(callback_);
@@ -449,6 +488,7 @@ void Player::FlushAndRestart() {
     pause_offset_.store(0, std::memory_order_release);
     pause_start_.store(0, std::memory_order_release);
     if (sync_) sync_->Seek();
+    video_first_frame_post_.store(1, std::memory_order_release);
     callback_->StartReading();
 
     LOG_INFO("Live: pipeline restarted");

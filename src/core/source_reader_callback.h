@@ -31,6 +31,7 @@ public:
     void SetReader(IMFSourceReader* reader, DWORD video_stream, DWORD audio_stream);
     void SetPlayer(Player* player) { player_ = player; }
     void SetAudioOutput(class AudioOutput* ao) { ao_ = ao; }
+    void SetLive(bool live) { is_live_ = live; }
     void ClearPointers() { reader_ = nullptr; ao_ = nullptr; player_ = nullptr; }
 
     HRESULT StartReading();
@@ -62,4 +63,5 @@ private:
     std::atomic<LONG> busy_{0};
     HANDLE idle_event_ = nullptr;  // signaled when busy_ == 0
     std::atomic<LONG> generation_{0};
+    bool is_live_ = false;
 };

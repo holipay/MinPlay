@@ -65,6 +65,7 @@ public:
     bool IsFinished() const;
     void OnVideoFormatChanged();
     void FlushAndRestart();
+    void NotifyLiveEof();
 
 public:
     bool IsOpenSuccessful() const { return open_ok_; }

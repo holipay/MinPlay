@@ -118,6 +118,7 @@ private:
     std::atomic<ULONG> async_result_{0};
     std::atomic<HRESULT> async_hr_{E_ABORT};
     bool cache_data_ = true;
+    HANDLE data_event_ = nullptr;  // signaled by AddSegment when new data arrives
 
     ULONG CopyFromSegmentsLocked(BYTE* pb, ULONG cb);
 };

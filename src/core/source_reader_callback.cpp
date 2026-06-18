@@ -74,17 +74,30 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
     }
 
     if (dwStreamFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
-        // Set EOF flag so stall detection can trigger RecreateReader if needed
-        if (dwStreamIndex == self->video_stream_)
-            self->video_eof_.store(true, std::memory_order_release);
-        else if (dwStreamIndex == self->audio_stream_)
-            self->audio_eof_.store(true, std::memory_order_release);
-        LOG_DEBUG("EOF stream=%lu", dwStreamIndex);
-        // Also re-request — if new data arrives, MF might recover without restart
-        CHECK_READER("eof re-request");
-        if (self->running_.load(std::memory_order_acquire)) {
-            Sleep(50);
-            self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
+        LOG_DEBUG("EOF stream=%lu%s", dwStreamIndex, self->is_live_ ? " (live)" : "");
+        if (self->is_live_) {
+            // Live stream: MF's TS demuxer signaled EOF after consuming its buffer.
+            // Do NOT re-request here — it just loops back to EOF instantly.
+            // Set EOF flags so VideoTick/CheckAudio stop requesting and stall
+            // detection can trigger a pipeline restart.
+            if (dwStreamIndex == self->video_stream_)
+                self->video_eof_.store(true, std::memory_order_release);
+            else if (dwStreamIndex == self->audio_stream_)
+                self->audio_eof_.store(true, std::memory_order_release);
+            // Notify player to attempt immediate restart
+            CHECK_PLAYER("live eof");
+            if (self->player_)
+                self->player_->NotifyLiveEof();
+        } else {
+            if (dwStreamIndex == self->video_stream_)
+                self->video_eof_.store(true, std::memory_order_release);
+            else if (dwStreamIndex == self->audio_stream_)
+                self->audio_eof_.store(true, std::memory_order_release);
+            CHECK_READER("eof re-request");
+            if (self->running_.load(std::memory_order_acquire)) {
+                Sleep(50);
+                self->reader_->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
+            }
         }
         return S_OK;
     }
