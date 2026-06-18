@@ -29,10 +29,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 1;
 
         case WM_LBUTTONDOWN:
-            if (g_player) g_player->PauseToggle();
+            // Delay single-click action to distinguish from double-click
+            SetTimer(hwnd, TIMER_CLICK_DELAY, GetDoubleClickTime(), nullptr);
             break;
 
         case WM_LBUTTONDBLCLK:
+            // Double-click detected: cancel pending single-click, toggle fullscreen
+            KillTimer(hwnd, TIMER_CLICK_DELAY);
             if (g_player) g_player->ToggleFullscreen();
             break;
 
@@ -110,6 +113,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     KillTimer(hwnd, TIMER_EOF_CHECK);
                     DestroyWindow(hwnd);
                 }
+            }
+            if (wp == TIMER_CLICK_DELAY) {
+                // Single-click confirmed (no double-click within timeout)
+                KillTimer(hwnd, TIMER_CLICK_DELAY);
+                if (g_player) g_player->PauseToggle();
             }
             break;
 
@@ -258,6 +266,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     KillTimer(g_hwnd, TIMER_AUDIO_CHECK);
     KillTimer(g_hwnd, TIMER_VIDEO_DISPLAY);
     KillTimer(g_hwnd, TIMER_EOF_CHECK);
+    KillTimer(g_hwnd, TIMER_CLICK_DELAY);
     delete g_player;
 
     MFShutdown();
