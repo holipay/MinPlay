@@ -128,26 +128,26 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback, bo
     amt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     amt->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
 
-    // Try native audio format first; fall back to 44100/2ch/16bit PCM
+    // Always request 16-bit PCM output — MF decoders may deliver 32-bit float
+    // which ReadSample would misinterpret as 16-bit integer, producing noise.
     {
         ComPtr<IMFMediaType> native;
         if (SUCCEEDED(reader->GetNativeMediaType(
                 (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &native))) {
-            UINT32 sr = 0, ch = 0, bps = 0;
+            UINT32 sr = 0, ch = 0;
             native->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &sr);
             native->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &ch);
-            native->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bps);
             amt->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sr);
             amt->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, ch);
-            amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, bps);
+            amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);  // Force 16-bit PCM
             hr = reader->SetCurrentMediaType(
                 (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, amt.get());
             if (SUCCEEDED(hr)) {
                 has_audio_ = true;
                 ai_.sample_rate = sr;
                 ai_.channels = ch;
-                ai_.bits_per_sample = bps;
-                LOG_INFO("Audio: %u Hz, %u ch, %u bit (native)", sr, ch, bps);
+                ai_.bits_per_sample = 16;
+                LOG_INFO("Audio: %u Hz, %u ch, 16 bit (forced PCM)", sr, ch);
             }
         }
     }
