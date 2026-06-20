@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <atomic>
 
-class WasapiAudioOutput : public AudioOutput {
+class WasapiAudioOutput : public AudioOutput, public IMMNotificationClient {
 public:
     WasapiAudioOutput() = default;
     ~WasapiAudioOutput() override;
@@ -33,6 +33,16 @@ public:
     void SetMuted(bool m) override { muted_.store(m, std::memory_order_release); }
     bool IsMuted() const override { return muted_.load(std::memory_order_acquire); }
 
+    // IMMNotificationClient
+    STDMETHODIMP OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR pwstrDeviceId) override;
+    STDMETHODIMP OnDeviceStateChanged(LPCWSTR, DWORD) override { return S_OK; }
+    STDMETHODIMP OnDeviceAdded(LPCWSTR) override { return S_OK; }
+    STDMETHODIMP OnDeviceRemoved(LPCWSTR) override { return S_OK; }
+    STDMETHODIMP OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override;
+    STDMETHODIMP_(ULONG) AddRef() override;
+    STDMETHODIMP_(ULONG) Release() override;
+
 private:
     static constexpr int RING_SIZE = 4 * 1024 * 1024;
 
@@ -43,6 +53,10 @@ private:
     HANDLE thread_ = nullptr;
     std::atomic<bool> playing_{false};
     bool exclusive_ = false;
+
+    // Device change detection (IMMNotificationClient)
+    IMMDeviceEnumerator* dev_enum_ = nullptr;
+    std::atomic<bool> device_changed_{false};  // Set by OnDefaultDeviceChanged, checked by playback thread
 
     int in_rate_ = 0;
     int in_channels_ = 0;
@@ -91,6 +105,9 @@ private:
     void RingWrite(const uint8_t* data, int size);
     float ReadSample(const uint8_t* p, int bits) const;
     void FillBuffer(BYTE* out, int out_frames);
+    bool ReinitDevice();  // Reinitialize WASAPI with current default device
+
+    std::atomic<ULONG> ref_count_{1};  // For IMMNotificationClient
 
     static DWORD WINAPI PlaybackThread(LPVOID arg);
     DWORD PlaybackThreadProc();

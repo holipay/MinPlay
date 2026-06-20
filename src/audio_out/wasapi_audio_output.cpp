@@ -159,6 +159,15 @@ DWORD WasapiAudioOutput::PlaybackThreadProc() {
     while (playing_) {
         DWORD wr = WaitForSingleObject(event_, 200);
         if (!playing_) break;
+
+        // Check if audio device changed (e.g. headphone plugged in)
+        if (device_changed_.exchange(false, std::memory_order_acquire)) {
+            if (!ReinitDevice()) {
+                LOG_ERROR("WASAPI: device reinit failed, continuing with old device");
+            }
+            continue;
+        }
+
         if (wr != WAIT_OBJECT_0) continue;
 
         // Periodic warning for ring buffer overflow
@@ -328,6 +337,14 @@ bool WasapiAudioOutput::Initialize(int sample_rate, int channels, int bits) {
         return false;
     }
 
+    // Register for audio device change notifications
+    hr = CoCreateInstance(CLSID_MMDeviceEnumerator_LOCAL, nullptr,
+        CLSCTX_ALL, IID_IMMDeviceEnumerator_LOCAL, (void**)&dev_enum_);
+    if (SUCCEEDED(hr)) {
+        dev_enum_->RegisterEndpointNotificationCallback(this);
+        LOG_INFO("WASAPI: registered for device change notifications");
+    }
+
     LOG_INFO("WASAPI: %d Hz -> %d Hz, %d ch -> %d ch, in %d bit, out %d bit",
              sample_rate, out_rate_, channels, out_channels_, bits, out_bits_);
     return true;
@@ -337,6 +354,11 @@ WasapiAudioOutput::~WasapiAudioOutput() {
     playing_ = false;
     if (event_) SetEvent(event_);
     if (thread_) { WaitForSingleObject(thread_, 1000); CloseHandle(thread_); }
+    if (dev_enum_) {
+        dev_enum_->UnregisterEndpointNotificationCallback(this);
+        dev_enum_->Release();
+        dev_enum_ = nullptr;
+    }
     if (clock_)  clock_->Release();
     if (render_) render_->Release();
     if (client_) client_->Release();
@@ -413,4 +435,171 @@ void WasapiAudioOutput::SetVolume(float vol) {
     if (vol < 0.0f) vol = 0.0f;
     if (vol > 1.0f) vol = 1.0f;
     volume_.store(vol, std::memory_order_release);
+}
+
+// ========================================================================
+// IMMNotificationClient — detect audio device changes (headphone plug/unplug)
+// ========================================================================
+
+STDMETHODIMP WasapiAudioOutput::QueryInterface(REFIID riid, void** ppv) {
+    if (!ppv) return E_POINTER;
+    if (riid == IID_IUnknown || riid == __uuidof(IMMNotificationClient)) {
+        *ppv = static_cast<IMMNotificationClient*>(this);
+        AddRef();
+        return S_OK;
+    }
+    *ppv = nullptr;
+    return E_NOINTERFACE;
+}
+
+STDMETHODIMP_(ULONG) WasapiAudioOutput::AddRef() {
+    return ref_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+STDMETHODIMP_(ULONG) WasapiAudioOutput::Release() {
+    LONG r = ref_count_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+    // Never actually delete — owned by Player via delete ao_
+    return (ULONG)r;
+}
+
+STDMETHODIMP WasapiAudioOutput::OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR) {
+    if (flow == eRender && role == eConsole) {
+        LOG_INFO("WASAPI: default render device changed — will switch on next buffer fill");
+        device_changed_.store(true, std::memory_order_release);
+        // Wake up the playback thread so it can reinitialize
+        if (event_) SetEvent(event_);
+    }
+    return S_OK;
+}
+
+// ========================================================================
+// ReinitDevice — switch to the new default audio device
+// Called from the playback thread when device_changed_ is set.
+// ========================================================================
+
+bool WasapiAudioOutput::ReinitDevice() {
+    LOG_INFO("WASAPI: reinitializing with new default device");
+
+    // Stop old client
+    if (client_) client_->Stop();
+
+    // Release old objects
+    if (clock_) { clock_->Release(); clock_ = nullptr; }
+    if (render_) { render_->Release(); render_ = nullptr; }
+    if (client_) { client_->Release(); client_ = nullptr; }
+
+    // Get new default device
+    IMMDevice* device = nullptr;
+    HRESULT hr = dev_enum_->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+    if (FAILED(hr)) {
+        LOG_ERROR("WASAPI: GetDefaultAudioEndpoint failed: 0x%08lX", hr);
+        return false;
+    }
+
+    hr = device->Activate(IID_IAudioClient_LOCAL, CLSCTX_ALL, nullptr, (void**)&client_);
+    if (FAILED(hr)) {
+        LOG_ERROR("WASAPI: Activate failed: 0x%08lX", hr);
+        device->Release();
+        return false;
+    }
+
+    // Get mix format
+    WAVEFORMATEX* mix = nullptr;
+    hr = client_->GetMixFormat(&mix);
+    if (FAILED(hr)) {
+        LOG_ERROR("WASAPI: GetMixFormat failed: 0x%08lX", hr);
+        device->Release();
+        client_->Release(); client_ = nullptr;
+        return false;
+    }
+
+    // Try exclusive mode first, fall back to shared
+    exclusive_ = false;
+    hr = client_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,
+        AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        (REFERENCE_TIME)200000, (REFERENCE_TIME)0, mix, nullptr);
+    if (SUCCEEDED(hr)) {
+        exclusive_ = true;
+        WAVEFORMATEX* actual = nullptr;
+        client_->GetMixFormat(&actual);
+        if (actual) {
+            out_rate_ = actual->nSamplesPerSec;
+            out_channels_ = actual->nChannels;
+            out_bits_ = actual->wBitsPerSample;
+            out_frame_bytes_ = actual->nBlockAlign;
+            bytes_per_sec_ = actual->nAvgBytesPerSec;
+            CoTaskMemFree(actual);
+        } else {
+            out_rate_ = mix->nSamplesPerSec;
+            out_channels_ = mix->nChannels;
+            out_bits_ = 16;
+            out_frame_bytes_ = mix->nChannels * 2;
+            bytes_per_sec_ = mix->nSamplesPerSec * mix->nChannels * 2;
+        }
+        CoTaskMemFree(mix);
+        LOG_INFO("WASAPI: switched to EXCLUSIVE %d Hz, %d ch", out_rate_, out_channels_);
+    } else {
+        client_->Release();
+        client_ = nullptr;
+        hr = device->Activate(IID_IAudioClient_LOCAL, CLSCTX_ALL, nullptr, (void**)&client_);
+        if (FAILED(hr)) {
+            LOG_ERROR("WASAPI: shared Activate failed: 0x%08lX", hr);
+            CoTaskMemFree(mix);
+            device->Release();
+            return false;
+        }
+        // Save format before CoTaskMemFree frees mix
+        out_rate_ = mix->nSamplesPerSec;
+        out_channels_ = mix->nChannels;
+        out_bits_ = mix->wBitsPerSample;
+        out_frame_bytes_ = mix->nBlockAlign;
+        bytes_per_sec_ = mix->nAvgBytesPerSec;
+        hr = client_->Initialize(AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            (REFERENCE_TIME)200000, (REFERENCE_TIME)0, mix, nullptr);
+        CoTaskMemFree(mix);
+        if (FAILED(hr)) {
+            LOG_ERROR("WASAPI: shared Initialize failed: 0x%08lX", hr);
+            client_->Release(); client_ = nullptr;
+            device->Release();
+            return false;
+        }
+        LOG_INFO("WASAPI: switched to SHARED %d Hz, %d ch", out_rate_, out_channels_);
+    }
+
+    device->Release();
+
+    // Set event handle
+    hr = client_->SetEventHandle(event_);
+    if (FAILED(hr)) {
+        LOG_ERROR("WASAPI: SetEventHandle failed: 0x%08lX", hr);
+        client_->Release(); client_ = nullptr;
+        return false;
+    }
+
+    // Get render client
+    hr = client_->GetService(IID_IAudioRenderClient_LOCAL, (void**)&render_);
+    if (FAILED(hr)) {
+        LOG_ERROR("WASAPI: GetService(RenderClient) failed: 0x%08lX", hr);
+        client_->Release(); client_ = nullptr;
+        return false;
+    }
+
+    // Get clock
+    hr = client_->GetService(IID_IAudioClock_LOCAL, (void**)&clock_);
+    if (FAILED(hr)) {
+        LOG_ERROR("WASAPI: GetService(Clock) failed: 0x%08lX", hr);
+        render_->Release(); render_ = nullptr;
+        client_->Release(); client_ = nullptr;
+        return false;
+    }
+
+    client_->GetBufferSize((UINT32*)&buffer_frames_);
+    client_->Start();
+
+    // Reset resampler state for new device
+    resample_frac_ = 0;
+
+    LOG_INFO("WASAPI: device switch complete, buffer=%d frames", buffer_frames_);
+    return true;
 }
