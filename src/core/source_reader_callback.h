@@ -29,10 +29,14 @@ public:
                                      DWORD dwStreamFlags, LONGLONG llTimestamp, IMFSample* pSample);
 
     void SetReader(IMFSourceReader* reader, DWORD video_stream, DWORD audio_stream);
-    void SetPlayer(Player* player) { player_ = player; }
-    void SetAudioOutput(class AudioOutput* ao) { ao_ = ao; }
+    void SetPlayer(Player* player) { player_.store(player, std::memory_order_release); }
+    void SetAudioOutput(class AudioOutput* ao) { ao_.store(ao, std::memory_order_release); }
     void SetLive(bool live) { is_live_ = live; }
-    void ClearPointers() { reader_ = nullptr; ao_ = nullptr; player_ = nullptr; }
+    void ClearPointers() {
+        reader_.store(nullptr, std::memory_order_release);
+        ao_.store(nullptr, std::memory_order_release);
+        player_.store(nullptr, std::memory_order_release);
+    }
 
     HRESULT StartReading();
     HRESULT Stop();
@@ -49,11 +53,11 @@ public:
 private:
     std::atomic<LONG> ref_count_{1};
 
-    IMFSourceReader* reader_ = nullptr;
+    std::atomic<IMFSourceReader*> reader_{nullptr};
     DWORD video_stream_ = (DWORD)-1;
     DWORD audio_stream_ = (DWORD)-1;
-    AudioOutput* ao_ = nullptr;
-    Player* player_ = nullptr;
+    std::atomic<AudioOutput*> ao_{nullptr};
+    std::atomic<Player*> player_{nullptr};
 
     CRITICAL_SECTION lock_;
     std::atomic<bool> running_{false};
