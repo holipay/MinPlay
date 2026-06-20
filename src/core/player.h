@@ -107,7 +107,7 @@ private:
         PixelFormat pix_fmt = PixelFormat::Unknown;
     };
 
-    static constexpr int VQ_SIZE = 32;
+    static constexpr int VQ_SIZE = 20;
 
     HWND hwnd_ = nullptr;
     std::atomic<PlayerState> state_{PlayerState::Stopped};

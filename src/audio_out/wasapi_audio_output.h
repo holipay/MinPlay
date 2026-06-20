@@ -44,7 +44,7 @@ public:
     STDMETHODIMP_(ULONG) Release() override;
 
 private:
-    static constexpr int RING_SIZE = 4 * 1024 * 1024;
+    static constexpr int RING_SIZE = 1 * 1024 * 1024;
 
     IAudioClient* client_ = nullptr;
     IAudioRenderClient* render_ = nullptr;

@@ -345,6 +345,11 @@ void Player::Seek(double seconds) {
 
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
+        for (int i = 0; i < VQ_SIZE; i++) {
+            free(vq_[i].data);
+            vq_[i].data = nullptr;
+            vq_[i].size = 0;
+        }
         vq_head_ = 0;
         vq_tail_ = 0;
     }
@@ -588,6 +593,11 @@ void Player::FlushAndRestart() {
     // Clear video queue — stale frames cause fast playback after restart
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
+        for (int i = 0; i < VQ_SIZE; i++) {
+            free(vq_[i].data);
+            vq_[i].data = nullptr;
+            vq_[i].size = 0;
+        }
         vq_head_ = 0;
         vq_tail_ = 0;
     }
@@ -800,6 +810,8 @@ void Player::VideoTick() {
             bool has_more = (next != tail);
 
             if (sd.action == SyncAction::Drop && has_more) {
+                free(f->data);
+                f->data = nullptr;
                 f->size = 0;
                 vq_head_ = next;
                 callback_->ConsumeVideo();
@@ -809,28 +821,23 @@ void Player::VideoTick() {
                 break;
             }
             {
-                if (f->size > frame_buf_size_) {
-                    uint8_t* nb = (uint8_t*)realloc(frame_buf_, f->size);
-                    if (nb) {
-                        frame_buf_ = nb;
-                        frame_buf_size_ = f->size;
-                    } else {
-                        LOG_WARN("OOM realloc frame_buf_: %d bytes", f->size);
-                        // Leave frame in queue — retry next tick
-                        break;
-                    }
-                }
-                if (frame_buf_ && f->size <= frame_buf_size_) {
-                    memcpy(frame_buf_, f->data, f->size);
-                    frame_ready_ = true;
-                    frame_size_ = f->size;
-                    frame_stride_ = f->stride;
-                    frame_render_w_ = f->width;
-                    frame_render_h_ = f->height;
-                    frame_pix_fmt_ = f->pix_fmt;
-                    if (f->pix_fmt != PixelFormat::Unknown)
-                        pix_fmt_ = f->pix_fmt;
-                }
+                // Move the frame pointer from queue slot to render buffer.
+                // This eliminates a full-frame memcpy (~3MB per frame at 1080p).
+                // The old frame_buf_ is freed, and the queue slot's data pointer
+                // is nulled so it won't be double-freed when the slot is reused.
+                free(frame_buf_);
+                frame_buf_ = f->data;
+                frame_buf_size_ = f->size;
+                f->data = nullptr;
+                f->size = 0;
+                frame_ready_ = true;
+                frame_size_ = frame_buf_size_;
+                frame_stride_ = f->stride;
+                frame_render_w_ = f->width;
+                frame_render_h_ = f->height;
+                frame_pix_fmt_ = f->pix_fmt;
+                if (f->pix_fmt != PixelFormat::Unknown)
+                    pix_fmt_ = f->pix_fmt;
             }
             f->size = 0;
             vq_head_ = next;
@@ -858,6 +865,17 @@ void Player::OnVideoFormatChanged() {
         stride_ = vi.stride;
         pix_fmt_ = fmt;
     }
+
+    // Shrink render buffers if new resolution is significantly smaller
+    if (vi.width > 0 && vi.height > 0) {
+        int new_size = vi.width * vi.height * 3 / 2;  // NV12 estimate
+        if (convert_buf_size_ > new_size * 2) {
+            free(convert_buf_);
+            convert_buf_ = (uint8_t*)malloc(new_size);
+            convert_buf_size_ = convert_buf_ ? new_size : 0;
+        }
+    }
+
     LOG_INFO("Player video format updated: %dx%d stride=%d @ %.1f fps",
              frame_w_.load(std::memory_order_relaxed), frame_h_.load(std::memory_order_relaxed),
              stride_.load(std::memory_order_relaxed), video_fps_.load(std::memory_order_relaxed));

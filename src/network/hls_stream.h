@@ -54,6 +54,12 @@ private:
 
     class HlsByteStream* byte_stream_ = nullptr;
 
+    // WinHTTP session/connection (reused across segment downloads)
+    HINTERNET http_session_ = nullptr;
+    HINTERNET http_connect_ = nullptr;
+    std::wstring http_host_;
+    INTERNET_PORT http_port_ = 0;
+
     // Download thread
     HANDLE download_thread_ = nullptr;
     std::atomic<bool> download_running_{false};

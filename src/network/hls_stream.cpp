@@ -423,6 +423,7 @@ void HlsByteStream::DiscardConsumedData() {
 
     // Erase consumed segments
     segs_.erase(segs_.begin(), segs_.begin() + keep_from);
+    if (segs_.capacity() > 64) segs_.shrink_to_fit();  // Release excess capacity
 
     total_bytes_.store(new_offset, std::memory_order_relaxed);
     read_pos_ = 0;
@@ -475,17 +476,29 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
         host = host.substr(0, colon);
     }
 
-    WinHttpHandle hSession(WinHttpOpen(L"MinPlay/1.0",
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, nullptr, nullptr, 0));
-    if (!hSession) { LOG_ERROR("WinHttpOpen failed: %u", GetLastError()); return false; }
+    // Reuse session and connection if host/port match
+    if (!http_session_ || !http_connect_ || host != http_host_ || port != http_port_) {
+        // Release old connection if host changed
+        if (http_connect_) { WinHttpCloseHandle(http_connect_); http_connect_ = nullptr; }
 
-    WinHttpHandle hConnect(WinHttpConnect(hSession, host.c_str(), port, 0));
-    if (!hConnect) return false;
+        // Create or recreate session
+        if (!http_session_) {
+            http_session_ = WinHttpOpen(L"MinPlay/1.0",
+                WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, nullptr, nullptr, 0);
+            if (!http_session_) { LOG_ERROR("WinHttpOpen failed: %u", GetLastError()); return false; }
+        }
+
+        http_connect_ = WinHttpConnect(http_session_, host.c_str(), port, 0);
+        if (!http_connect_) { LOG_ERROR("WinHttpConnect failed: %u", GetLastError()); return false; }
+        http_host_ = host;
+        http_port_ = port;
+        LOG_INFO("HLS: new connection to %ws:%d", host.c_str(), port);
+    }
 
     DWORD flags = WINHTTP_FLAG_ESCAPE_DISABLE;
     if (is_https) flags |= WINHTTP_FLAG_SECURE;
 
-    WinHttpHandle hRequest(WinHttpOpenRequest(hConnect, L"GET", path.c_str(), nullptr,
+    WinHttpHandle hRequest(WinHttpOpenRequest(http_connect_, L"GET", path.c_str(), nullptr,
         nullptr, nullptr, flags));
     if (!hRequest) return false;
 
@@ -972,6 +985,12 @@ void HlsManager::Close() {
     is_live_ = false;
     duration_ = 0;
     eos_sent_ = false;
+
+    // Release WinHTTP session/connection
+    if (http_connect_) { WinHttpCloseHandle(http_connect_); http_connect_ = nullptr; }
+    if (http_session_) { WinHttpCloseHandle(http_session_); http_session_ = nullptr; }
+    http_host_.clear();
+    http_port_ = 0;
 }
 
 HlsByteStream* HlsManager::GetByteStream() {
