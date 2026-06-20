@@ -270,7 +270,7 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
 
     float clearColor[4] = {0, 0, 0, 1};
     ctx_->OMSetRenderTargets(1, &rtv_, nullptr);
-    ctx_->ClearRenderTargetView(rtv_, clearColor);
+    // Note: fullscreen quad covers entire back buffer, no need for ClearRenderTargetView
 
     D3D11_VIEWPORT vp = {0, 0, (float)win_w_, (float)win_h_, 0, 1};
     ctx_->RSSetViewports(1, &vp);
@@ -294,13 +294,19 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
         {{-hw, -hh}, {0, 1}},
         {{ hw, -hh}, {1, 1}},
     };
-    D3D11_MAPPED_SUBRESOURCE vb_map;
-    if (FAILED(ctx_->Map(vbuf_, 0, D3D11_MAP_WRITE_DISCARD, 0, &vb_map))) {
-        LOG_WARN("Map vertex buffer failed");
-        return;
+
+    // Only remap vertex buffer when vertices actually change
+    float vb_key[8];
+    memcpy(vb_key, box, sizeof(vb_key));
+    if (vb_dirty_ || memcmp(vb_key, last_vb_data_, sizeof(vb_key)) != 0) {
+        D3D11_MAPPED_SUBRESOURCE vb_map;
+        if (SUCCEEDED(ctx_->Map(vbuf_, 0, D3D11_MAP_WRITE_DISCARD, 0, &vb_map))) {
+            memcpy(vb_map.pData, box, sizeof(box));
+            ctx_->Unmap(vbuf_, 0);
+            memcpy(last_vb_data_, vb_key, sizeof(vb_key));
+            vb_dirty_ = false;
+        }
     }
-    memcpy(vb_map.pData, box, sizeof(box));
-    ctx_->Unmap(vbuf_, 0);
 
     if (is_nv12 && ps_nv12_) {
         ctx_->PSSetShader(ps_nv12_, nullptr, 0);
@@ -365,6 +371,7 @@ void D3D11VideoOutput::Resize(int w, int h) {
     }
     win_w_ = w;
     win_h_ = h;
+    vb_dirty_ = true;  // Vertex positions change with window size
 
     if (rtv_) { rtv_->Release(); rtv_ = nullptr; }
     ID3D11Texture2D* backbuf = nullptr;

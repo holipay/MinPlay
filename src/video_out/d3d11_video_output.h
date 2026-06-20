@@ -91,6 +91,8 @@ private:
     int tex_h_ = 0;
     int tex_is_nv12_ = 0;
     bool was_iconic_ = false;
+    bool vb_dirty_ = true;  // Track if vertex buffer needs remap
+    float last_vb_data_[8] = {};  // Last vertex data for change detection
 
     OverlayDrawFunc overlay_func_ = nullptr;
     void* overlay_ctx_ = nullptr;

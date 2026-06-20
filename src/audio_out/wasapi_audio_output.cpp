@@ -70,6 +70,41 @@ void WasapiAudioOutput::FillBuffer(BYTE* out, int out_frames) {
 
     double ratio = (double)in_rate_ / out_rate_ * speed_;
 
+    // Fast path: same rate + speed 1.0 — skip resampling, just copy PCM → float
+    if (ratio == 1.0 && in_rate_ == out_rate_) {
+        int avail = RingAvail();
+        int in_bytes = out_frames * in_fb;
+        if (in_bytes > avail) in_bytes = avail - (avail % in_fb);
+        int frames = in_bytes / in_fb;
+        if (frames <= 0) {
+            if (out_frames > 0) memset(out_f, 0, out_frames * out_ch * sizeof(float));
+            return;
+        }
+
+        // Read directly from ring buffer
+        int t = ring_tail_.load(std::memory_order_relaxed);
+        float vol = muted_.load(std::memory_order_acquire) ? 0.0f : volume_.load(std::memory_order_acquire);
+        bool apply_vol = (vol != 1.0f);
+
+        for (int f = 0; f < frames; f++) {
+            for (int ch = 0; ch < out_ch; ch++) {
+                int ic = ch < in_ch ? ch : 0;
+                int offset = (t + f * in_fb + ic * (in_bits_ / 8)) % ring_size_;
+                float s = ReadSample(ring_ + offset, in_bits_);
+                if (apply_vol) s *= vol;
+                out_f[f * out_ch + ch] = s;
+            }
+        }
+
+        ring_tail_.store((t + frames * in_fb) % ring_size_, std::memory_order_release);
+
+        if (frames < out_frames)
+            memset(out_f + frames * out_ch, 0, (out_frames - frames) * out_ch * sizeof(float));
+        return;
+    }
+
+    // Slow path: resampling with cubic interpolation
+
     int avail = RingAvail();
     int in_needed = (int)(out_frames * ratio) + 1;
     int in_bytes = in_needed * in_fb;

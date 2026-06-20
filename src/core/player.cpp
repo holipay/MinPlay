@@ -695,7 +695,7 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
                 if (fs == 0) fs = fw;  // ultimate fallback
             }
         }
-        LOG_INFO("NV12 stride detect: %dx%d buf=%lu → stride=%d",
+        LOG_DEBUG("NV12 stride detect: %dx%d buf=%lu → stride=%d",
                  fw, fh, (unsigned long)cur_len_dw, fs);
     }
 
