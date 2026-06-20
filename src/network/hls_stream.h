@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <winhttp.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <string>
@@ -58,6 +59,7 @@ private:
     std::atomic<bool> download_running_{false};
     std::atomic<int> next_segment_to_download_{0};
     HANDLE wake_event_ = nullptr;
+    HINTERNET active_request_ = nullptr;  // Current WinHTTP request for cancellation (NULL = none)
 
     std::atomic<int> consumed_up_to_{0};
     bool eos_sent_ = false;
@@ -99,6 +101,7 @@ public:
     void SetCacheData(bool cache) { cache_data_ = cache; }
     bool CheckAndClearNeedsWake();
     bool HasUnreadData() const;
+    void Abort();  // Unblock pending reads for shutdown
 
 private:
     std::atomic<LONG> ref_count_{1};

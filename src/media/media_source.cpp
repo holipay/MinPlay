@@ -246,10 +246,11 @@ IMFSourceReader* MediaSource::RecreateReader(IMFSourceReaderCallback* callback) 
     // Wait for new data before creating reader — MFCreateSourceReaderFromByteStream
     // blocks the main thread while the TS demuxer probes the byte stream.
     // If the byte stream is empty, BeginRead blocks until data arrives.
+    // 2s timeout keeps main thread responsive; stall detection retries if needed.
     if (!bs->HasUnreadData()) {
         LOG_INFO("Waiting for new segment data...");
-        if (!bs->WaitForData(10000)) {
-            LOG_WARN("No data after 10s, aborting reader recreation");
+        if (!bs->WaitForData(2000)) {
+            LOG_WARN("No data after 2s, aborting reader recreation");
             bs->Release();
             return nullptr;
         }

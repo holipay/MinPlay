@@ -336,7 +336,7 @@ bool WasapiAudioOutput::Initialize(int sample_rate, int channels, int bits) {
 WasapiAudioOutput::~WasapiAudioOutput() {
     playing_ = false;
     if (event_) SetEvent(event_);
-    if (thread_) { WaitForSingleObject(thread_, 3000); CloseHandle(thread_); }
+    if (thread_) { WaitForSingleObject(thread_, 1000); CloseHandle(thread_); }
     if (clock_)  clock_->Release();
     if (render_) render_->Release();
     if (client_) client_->Release();

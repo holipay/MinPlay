@@ -261,11 +261,12 @@ HRESULT SourceReaderCallback::Stop() {
     running_.store(false, std::memory_order_release);
     generation_.fetch_add(1, std::memory_order_release);
     LeaveCriticalSection(&lock_);
-    // Wait for any in-flight OnReadSample to finish before caller deletes objects
+    // Wait for any in-flight OnReadSample to finish before caller deletes objects.
+    // OnReadSample processes a single sample and returns — 1s is generous.
     if (busy_.load(std::memory_order_acquire) > 0 && idle_event_) {
-        DWORD wr = WaitForSingleObject(idle_event_, 5000);
+        DWORD wr = WaitForSingleObject(idle_event_, 1000);
         if (wr == WAIT_TIMEOUT)
-            LOG_WARN("Stop: OnReadSample still busy after 5s");
+            LOG_WARN("Stop: OnReadSample still busy after 1s");
     }
     return S_OK;
 }

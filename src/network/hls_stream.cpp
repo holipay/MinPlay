@@ -308,6 +308,14 @@ STDMETHODIMP HlsByteStream::Close() {
     return S_OK;
 }
 
+void HlsByteStream::Abort() {
+    LOG_WARN("HlsBS: Abort() — unblocking pending reads");
+    EnterCriticalSection(&lock_);
+    closed_ = true;
+    LeaveCriticalSection(&lock_);
+    if (data_event_) SetEvent(data_event_);
+}
+
 void HlsByteStream::AddSegment(std::vector<uint8_t> data) {
     EnterCriticalSection(&lock_);
 
@@ -500,13 +508,18 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
     // Set timeout
     WinHttpSetTimeouts(hRequest, 5000, 5000, 10000, 10000);
 
+    // Store request handle so Close() can cancel pending WinHTTP operations
+    active_request_ = hRequest;
+
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
         WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+        active_request_ = nullptr;
         LOG_ERROR("WinHttpSendRequest failed: %u", GetLastError());
         return false;
     }
 
     if (!WinHttpReceiveResponse(hRequest, nullptr)) {
+        active_request_ = nullptr;
         LOG_ERROR("WinHttpReceiveResponse failed: %u", GetLastError());
         return false;
     }
@@ -542,6 +555,7 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
     }
 
     if (!download_running_) return false;
+    active_request_ = nullptr;
     return read_ok;
 }
 
@@ -931,18 +945,26 @@ void HlsManager::DownloadLoop() {
 void HlsManager::Close() {
     download_running_ = false;
     SetEvent(wake_event_);
+
+    // Cancel any in-flight WinHTTP request to unblock the download thread.
+    // WinHttpCloseHandle on a pending request causes WinHttpSendRequest /
+    // WinHttpReceiveResponse / WinHttpReadData to fail immediately.
+    HINTERNET req = active_request_;
+    if (req) {
+        active_request_ = nullptr;
+        WinHttpCloseHandle(req);
+    }
+
     if (download_thread_) {
-        // Use timeout: if download thread is stuck in WinHTTP (up to ~30s),
-        // avoid blocking window teardown indefinitely.
-        DWORD wr = WaitForSingleObject(download_thread_, 10000);
+        DWORD wr = WaitForSingleObject(download_thread_, 5000);
         if (wr == WAIT_TIMEOUT) {
-            LOG_WARN("HLS download thread did not exit in 10s, terminating");
-            TerminateThread(download_thread_, 0);
+            LOG_WARN("HLS download thread did not exit in 5s after WinHTTP cancel");
         }
         CloseHandle(download_thread_);
         download_thread_ = nullptr;
     }
     if (byte_stream_) {
+        byte_stream_->Abort();
         byte_stream_->Close();
         byte_stream_->Release();
         byte_stream_ = nullptr;
