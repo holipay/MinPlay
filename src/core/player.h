@@ -6,6 +6,7 @@
 #include "../sync/sync_context.h"
 #include "../util/osd.h"
 #include "source_reader_callback.h"
+#include "playlist.h"
 #include <windows.h>
 #include <mfapi.h>
 #include <cstdint>
@@ -20,6 +21,7 @@
 #define TIMER_OSD_REFRESH   5
 #define WM_RESTART_LIVE     (WM_APP + 1)
 #define WM_OPEN_COMPLETE    (WM_APP + 2)
+#define WM_PLAYLIST_DONE    (WM_APP + 3)
 
 // Audio buffering thresholds
 constexpr int AUDIO_BUFFER_NETWORK_MULT = 5;   // 5 × bitrate for network (5 s buffer)
@@ -77,11 +79,21 @@ public:
     void FlushAndRestart();
     void NotifyLiveEof();
 
+    // Playlist support
+    void SetPlaylist(PlaylistManager* pl) { playlist_ = pl; }
+    void OnTrackFinished();
+    bool PlayNext();
+    bool PlayPrev();
+    bool HasPlaylist() const { return playlist_ && playlist_->GetCount() > 0; }
+
 public:
     bool IsOpenSuccessful() const { return open_ok_; }
+    int GetOpenGeneration() const { return open_generation_.load(std::memory_order_acquire); }
+    int GetSourceGeneration() const { return source_generation_.load(std::memory_order_acquire); }
 
 private:
-    void OpenAsync(std::wstring url, bool audio_only);
+    void OpenAsync(std::wstring url, bool audio_only, int generation);
+    void PlayCurrentTrack();
     void TryRestartLivePipeline();
     void StartVideoTimer();
     void StopVideoTimer();
@@ -123,11 +135,14 @@ private:
     std::atomic<double> last_video_frame_time_{0};
     std::atomic<double> last_audio_data_time_{0};
     std::atomic<double> last_restart_time_{0};
+    std::atomic<int> source_generation_{0};  // Increments on each Open(); WM_RESTART_LIVE carries this
 
     // Async open (background thread)
     std::thread open_thread_;
     std::atomic<bool> open_running_{false};
+    std::atomic<int> open_generation_{0};  // Increments on each Open(); WM_OPEN_COMPLETE carries this
     bool open_ok_ = false;
+    PlaylistManager* playlist_ = nullptr;
 
     // Frame queue (producer: MF callback, consumer: main thread)
     // All accesses are under vq_mutex_ — plain int is sufficient

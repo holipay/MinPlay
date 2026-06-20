@@ -1,5 +1,6 @@
 #include "util/com_ptr.h"
 #include "core/player.h"
+#include "core/playlist.h"
 #include "util/log.h"
 #include <windows.h>
 #include <shellapi.h>
@@ -80,29 +81,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case 'Q':
                     DestroyWindow(hwnd);
                     break;
-
-                // Frame stepping (MPlayer: . forward, , backward)
-                case VK_OEM_PERIOD: { // . key
-                    if (g_player->GetState() != PlayerState::Paused)
-                        g_player->PauseToggle();
-                    double fps = g_player->GetVideoFps();
-                    if (fps > 0) {
-                        double pos = g_player->GetPosition() + 1.0 / fps;
-                        double dur = g_player->GetDuration();
-                        g_player->Seek(dur > 0 && pos > dur ? dur : pos);
-                    }
-                    break;
-                }
-                case VK_OEM_COMMA: { // , key
-                    if (g_player->GetState() != PlayerState::Paused)
-                        g_player->PauseToggle();
-                    double fps = g_player->GetVideoFps();
-                    if (fps > 0) {
-                        double pos = g_player->GetPosition() - 1.0 / fps;
-                        g_player->Seek(pos < 0 ? 0 : pos);
-                    }
-                    break;
-                }
 
                 // Seek control (MPlayer: Left/Right ±10s, Up/Down ±60s, PgUp/PgDn ±60s)
                 case VK_LEFT: {
@@ -204,6 +182,43 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     else
                         DestroyWindow(hwnd);
                     break;
+
+                // Playlist: next/prev track (MPlayer: > next, < prev)
+                case 'n':
+                case 'N':
+                    g_player->PlayNext();
+                    break;
+                case VK_OEM_PERIOD: { // > key (shift+.)
+                    if (GetKeyState(VK_SHIFT) & 0x8000) {
+                        g_player->PlayNext();
+                    } else {
+                        // Frame stepping
+                        if (g_player->GetState() != PlayerState::Paused)
+                            g_player->PauseToggle();
+                        double fps = g_player->GetVideoFps();
+                        if (fps > 0) {
+                            double pos = g_player->GetPosition() + 1.0 / fps;
+                            double dur = g_player->GetDuration();
+                            g_player->Seek(dur > 0 && pos > dur ? dur : pos);
+                        }
+                    }
+                    break;
+                }
+                case VK_OEM_COMMA: { // < key (shift+,)
+                    if (GetKeyState(VK_SHIFT) & 0x8000) {
+                        g_player->PlayPrev();
+                    } else {
+                        // Frame stepping
+                        if (g_player->GetState() != PlayerState::Paused)
+                            g_player->PauseToggle();
+                        double fps = g_player->GetVideoFps();
+                        if (fps > 0) {
+                            double pos = g_player->GetPosition() - 1.0 / fps;
+                            g_player->Seek(pos < 0 ? 0 : pos);
+                        }
+                    }
+                    break;
+                }
                 }
             }
             break;
@@ -215,8 +230,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_player->VideoTick();
             if (wp == TIMER_EOF_CHECK && g_player) {
                 if (g_player->IsFinished()) {
-                    KillTimer(hwnd, TIMER_EOF_CHECK);
-                    DestroyWindow(hwnd);
+                    if (g_player->HasPlaylist()) {
+                        g_player->OnTrackFinished();
+                        // Re-arm EOF timer for next track
+                        SetTimer(hwnd, TIMER_EOF_CHECK, 500, nullptr);
+                    } else {
+                        KillTimer(hwnd, TIMER_EOF_CHECK);
+                        DestroyWindow(hwnd);
+                    }
                 }
             }
             if (wp == TIMER_CLICK_DELAY) {
@@ -231,9 +252,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_OPEN_COMPLETE:
             if (!g_player) break;
+            // Discard stale WM_OPEN_COMPLETE from a previous Open() call
+            if ((int)lp != g_player->GetOpenGeneration()) break;
             if (wp == 0 || !g_player->IsOpenSuccessful()) {
-                KillTimer(hwnd, TIMER_EOF_CHECK);
-                DestroyWindow(hwnd);
+                if (g_player->HasPlaylist()) {
+                    // Skip to next track on failure
+                    LOG_WARN("Track failed to open, trying next...");
+                    g_player->OnTrackFinished();
+                    SetTimer(hwnd, TIMER_EOF_CHECK, 500, nullptr);
+                } else {
+                    KillTimer(hwnd, TIMER_EOF_CHECK);
+                    DestroyWindow(hwnd);
+                }
                 break;
             }
             SetWindowText(hwnd, TEXT("MinPlay"));
@@ -249,8 +279,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
 
         case WM_RESTART_LIVE:
-            if (g_player)
+            if (g_player && (int)lp == g_player->GetSourceGeneration())
                 g_player->FlushAndRestart();
+            break;
+
+        case WM_PLAYLIST_DONE:
+            KillTimer(hwnd, TIMER_EOF_CHECK);
+            DestroyWindow(hwnd);
             break;
 
         case WM_DESTROY:
@@ -340,6 +375,33 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
+    // Detect playlist file (.m3u/.m3u8 extension, local only)
+    bool is_playlist = false;
+    PlaylistManager playlist;
+    {
+        std::wstring wurl(url);
+        if (wurl.find(L"://") == std::wstring::npos) {
+            size_t dot = wurl.rfind(L'.');
+            if (dot != std::wstring::npos) {
+                std::wstring ext = wurl.substr(dot);
+                if (_wcsicmp(ext.c_str(), L".m3u") == 0 ||
+                    _wcsicmp(ext.c_str(), L".m3u8") == 0)
+                    is_playlist = true;
+            }
+        }
+        if (is_playlist) {
+            if (!playlist.LoadFromFile(url)) {
+                MessageBoxA(nullptr, "Failed to parse playlist file.", "Error", MB_OK);
+                return 1;
+            }
+            wcsncpy_s(url, 2048, playlist.GetCurrent().url.c_str(), _TRUNCATE);
+            if (!IsSchemeAllowed(url)) {
+                MessageBoxA(nullptr, "Unsupported protocol in playlist entry.", "Security", MB_OK);
+                return 1;
+            }
+        }
+    }
+
     WNDCLASSEX wc = {sizeof(wc)};
     wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc   = WndProc;
@@ -369,6 +431,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         MessageBoxA(nullptr, "Out of memory", "Error", MB_OK);
         return 1;
     }
+    if (is_playlist)
+        g_player->SetPlaylist(&playlist);
     SetWindowText(g_hwnd, TEXT("MinPlay - Loading..."));
     bool open_ok = g_player->Open(g_hwnd, url, audio_only);
     if (!open_ok) {

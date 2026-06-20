@@ -74,26 +74,38 @@ bool Player::Open(HWND hwnd, const wchar_t* url, bool audio_only) {
 
     state_.store(PlayerState::Opening, std::memory_order_release);
 
+    open_generation_.fetch_add(1, std::memory_order_relaxed);
+    source_generation_.fetch_add(1, std::memory_order_relaxed);
     open_running_ = true;
-    open_thread_ = std::thread([this, url_str = std::wstring(url), audio_only]() {
-        OpenAsync(url_str, audio_only);
+    int gen = open_generation_.load(std::memory_order_relaxed);
+    open_thread_ = std::thread([this, url_str = std::wstring(url), audio_only, gen]() {
+        OpenAsync(url_str, audio_only, gen);
     });
     return true;
 }
 
-void Player::OpenAsync(std::wstring url, bool audio_only) {
+void Player::OpenAsync(std::wstring url, bool audio_only, int generation) {
     source_ = new (std::nothrow) MediaSource();
     if (!source_) {
         LOG_CRITICAL("Out of memory: source_");
         open_ok_ = false;
-        PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, 0);
+        PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, generation);
         return;
     }
 
     if (!source_->Open(url.c_str(), callback_, audio_only)) {
         LOG_ERROR("Failed to open media source");
         open_ok_ = false;
-        PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, 0);
+        PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, generation);
+        return;
+    }
+
+    // Check abort after potentially long network/HLS open
+    if (!open_running_.load(std::memory_order_acquire)) {
+        LOG_INFO("OpenAsync: aborted after source open");
+        open_ok_ = false;
+        source_->Close(); delete source_; source_ = nullptr;
+        PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, generation);
         return;
     }
 
@@ -129,9 +141,18 @@ void Player::OpenAsync(std::wstring url, bool audio_only) {
         if (!has_audio_ && !source_->HasVideo()) {
             LOG_WARN("Audio-only stream lost audio output — cannot play");
             open_ok_ = false;
-            PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, 0);
+            PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, generation);
             return;
         }
+    }
+
+    // Check abort after audio output init
+    if (!open_running_.load(std::memory_order_acquire)) {
+        LOG_INFO("OpenAsync: aborted after audio init");
+        open_ok_ = false;
+        source_->Close(); delete source_; source_ = nullptr;
+        PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, generation);
+        return;
     }
 
     {
@@ -149,7 +170,7 @@ void Player::OpenAsync(std::wstring url, bool audio_only) {
         if (!sync_) {
             LOG_CRITICAL("Out of memory: sync_");
             open_ok_ = false;
-            PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, 0);
+            PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, generation);
             return;
         }
     }
@@ -170,13 +191,13 @@ void Player::OpenAsync(std::wstring url, bool audio_only) {
     }
 
     callback_->SetPlayer(this);
-    callback_->SetLive(source_->IsLive());
+    callback_->SetLive(source_->IsLive() || source_->Duration() <= 0);
     callback_->SetReader(source_->GetReader(),
                           source_->GetVideoStream(),
                           source_->GetAudioStream());
 
     open_ok_ = true;
-    PostMessage(hwnd_, WM_OPEN_COMPLETE, 1, 0);
+    PostMessage(hwnd_, WM_OPEN_COMPLETE, 1, generation);
 }
 
 void Player::Close() {
@@ -249,6 +270,39 @@ void Player::Play() {
     StartVideoTimer();
     if (has_video_)
         PostMessage(hwnd_, WM_TIMER, TIMER_VIDEO_DISPLAY, 0);
+}
+
+void Player::PlayCurrentTrack() {
+    if (!playlist_) return;
+    const auto& entry = playlist_->GetCurrent();
+    LOG_INFO("Playlist: playing track %d/%d — %S",
+             playlist_->GetIndex() + 1, playlist_->GetCount(),
+             entry.title.empty() ? entry.url.c_str() : entry.title.c_str());
+    Close();
+    Open(hwnd_, entry.url.c_str(), audio_only_);
+}
+
+void Player::OnTrackFinished() {
+    if (!playlist_ || !playlist_->HasNext()) {
+        PostMessage(hwnd_, WM_PLAYLIST_DONE, 0, 0);
+        return;
+    }
+    playlist_->Next();
+    PlayCurrentTrack();
+}
+
+bool Player::PlayNext() {
+    if (!playlist_ || !playlist_->HasNext()) return false;
+    playlist_->Next();
+    PlayCurrentTrack();
+    return true;
+}
+
+bool Player::PlayPrev() {
+    if (!playlist_ || !playlist_->HasPrev()) return false;
+    playlist_->Prev();
+    PlayCurrentTrack();
+    return true;
 }
 
 void Player::PauseToggle() {
@@ -407,17 +461,28 @@ void Player::Paint(HDC hdc, int /*w*/, int /*h*/) {
 
 void Player::DrawOSD(HDC hdc) {
     if (osd_) {
+        const wchar_t* track_title = nullptr;
+        int track_idx = -1;
+        int track_count = 0;
+        if (playlist_ && playlist_->GetCount() > 0) {
+            track_idx = playlist_->GetIndex();
+            track_count = playlist_->GetCount();
+            const auto& entry = playlist_->GetCurrent();
+            if (!entry.title.empty())
+                track_title = entry.title.c_str();
+        }
         osd_->Draw(hdc, GetPosition(), GetDuration(),
                    (int)video_fps_.load(std::memory_order_relaxed),
                    ao_ ? ao_->GetVolume() : 1.0f,
-                   ao_ ? ao_->IsMuted() : false);
+                   ao_ ? ao_->IsMuted() : false,
+                   track_idx, track_count, track_title);
     }
 }
 
 bool Player::IsFinished() const {
     auto s = state_.load(std::memory_order_acquire);
     if (s != PlayerState::Playing && s != PlayerState::Paused) return false;
-    if (source_ && source_->IsLive()) return false;
+    if (source_ && (source_->IsLive() || source_->Duration() <= 0)) return false;
     bool vq_empty;
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
@@ -449,7 +514,7 @@ uint8_t* Player::ConvertI420ToNV12(const uint8_t* i420, int w, int h) {
 }
 
 void Player::TryRestartLivePipeline() {
-    if (!source_ || !source_->IsLive() || !callback_) return;
+    if (!source_ || !(source_->IsLive() || source_->Duration() <= 0) || !callback_) return;
 
     // Only restart if truly stalled: no video frames for 3+ seconds
     double now = GetTimeSec(perf_freq_);
@@ -474,7 +539,7 @@ void Player::TryRestartLivePipeline() {
     if (!live_restarting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
 
-    PostMessage(hwnd_, WM_RESTART_LIVE, 0, 0);
+    PostMessage(hwnd_, WM_RESTART_LIVE, 0, source_generation_.load(std::memory_order_relaxed));
 }
 
 void Player::NotifyLiveEof() {
@@ -499,7 +564,8 @@ void Player::NotifyLiveEof() {
     }
 
     LOG_INFO("Live: EOF, immediate restart%s", audio_only_ ? " (audio-only)" : "");
-    PostMessage(hwnd_, WM_RESTART_LIVE, 0, 0);
+    int gen = source_generation_.load(std::memory_order_relaxed);
+    PostMessage(hwnd_, WM_RESTART_LIVE, 0, gen);
 }
 
 void Player::FlushAndRestart() {
@@ -593,9 +659,34 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     }
 
     if (vq_fmt == PixelFormat::NV12 && fh > 0 && cur_len_dw > 0) {
-        size_t nv12_pitch = (size_t)fh * 3 / 2;
-        int actual = (int)((size_t)cur_len_dw / nv12_pitch);
-        if (actual >= fw) fs = actual;
+        // NV12 total = stride * actual_height * 3/2
+        // MF may report fh with padding (e.g. 1088 for 1080), or buffer may
+        // contain slightly more/fewer bytes than expected.  Try to recover the
+        // real stride by checking whether the buffer divides evenly.
+        size_t nv12_rows = (size_t)fh * 3 / 2;
+        if (nv12_rows > 0) {
+            size_t s = (size_t)cur_len_dw / nv12_rows;
+            if (s >= (size_t)fw && s * nv12_rows == (size_t)cur_len_dw) {
+                fs = (int)s;
+            } else {
+                // Exact division failed — the reported height may include
+                // padding rows.  Walk downward (even steps) until we find a
+                // height that divides evenly and yields a valid stride.
+                fs = 0;
+                for (int h_try = fh; h_try > 0 && h_try >= fh - 64; h_try -= 2) {
+                    size_t rows2 = (size_t)h_try * 3 / 2;
+                    if (rows2 == 0) continue;
+                    size_t s2 = (size_t)cur_len_dw / rows2;
+                    if (s2 >= (size_t)fw && s2 * rows2 == (size_t)cur_len_dw) {
+                        fs = (int)s2;
+                        break;
+                    }
+                }
+                if (fs == 0) fs = fw;  // ultimate fallback
+            }
+        }
+        LOG_INFO("NV12 stride detect: %dx%d buf=%lu → stride=%d",
+                 fw, fh, (unsigned long)cur_len_dw, fs);
     }
 
     if (vq_fmt == PixelFormat::YUY2 && fw > 0 && fh > 0) {
