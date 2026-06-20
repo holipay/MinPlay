@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(MinPlay
     src/main.cpp
     src/core/player.cpp
+    src/core/playlist.cpp
     src/core/source_reader_callback.cpp
     src/media/media_source.cpp
     src/network/hls_stream.cpp
