@@ -112,6 +112,12 @@ void WasapiAudioOutput::FillBuffer(BYTE* out, int out_frames) {
     if (in_bytes > avail) {
         in_bytes = avail - (avail % in_fb);
         in_needed = in_bytes / in_fb;
+        // Log buffer underrun for diagnostics
+        static int underrun_count = 0;
+        if (++underrun_count % 50 == 0) {
+            LOG_WARN("Audio buffer underrun: needed %d bytes, avail %d bytes (underrun #%d)",
+                     in_needed * in_fb, avail, underrun_count);
+        }
     }
     if (in_bytes > tmp_buf_size_) {
         in_bytes = tmp_buf_size_ - (tmp_buf_size_ % in_fb);
