@@ -79,17 +79,13 @@ STDMETHODIMP TsByteStream::IsEndOfStream(BOOL* pfEndOfStream) {
 }
 
 bool TsByteStream::RefillBuffer() {
-    // Read TS data from HlsByteStream and parse with TsDemuxer
-    EnterCriticalSection(&lock_);
-
-    // Try to get frames from demuxer first
+    // Get frames from TsDemuxer (which maintains its own state)
     DemuxFrame frame;
     if (demuxer_.GetNextFrame(frame)) {
         output_buffer_ = std::move(frame.data);
         output_pos_ = 0;
         output_size_ = (int)output_buffer_.size();
 
-        // Update stream info from first frames
         if (!has_video_ && frame.type == DemuxFrame::Video && frame.data.size() > 0) {
             has_video_ = true;
             LOG_INFO("TsByteStream: video stream detected (%zu bytes)", frame.data.size());
@@ -98,37 +94,43 @@ bool TsByteStream::RefillBuffer() {
             has_audio_ = true;
             LOG_INFO("TsByteStream: audio stream detected (%zu bytes)", frame.data.size());
         }
-
-        LeaveCriticalSection(&lock_);
         return true;
     }
 
-    // No frames available — read more TS data from HlsByteStream
-    LeaveCriticalSection(&lock_);
-
+    // No frames — read more TS data from HlsByteStream and feed to demuxer
     if (!hls_stream_) return false;
 
-    // Read a chunk of TS data
     const int TS_READ_SIZE = 256 * 1024;
     std::vector<uint8_t> ts_data(TS_READ_SIZE);
     ULONG ts_bytes_read = 0;
     HRESULT hr = hls_stream_->Read(ts_data.data(), TS_READ_SIZE, &ts_bytes_read);
 
     if (FAILED(hr) || ts_bytes_read == 0) {
-        return false;
+        return false;  // No data available yet — caller should retry
     }
 
-    // Parse TS data with TsDemuxer
-    // Feed raw TS bytes to the demuxer
-    EnterCriticalSection(&lock_);
-    demuxer_.Reset();
+    // Feed TS data to demuxer (it maintains state internally)
+    // TsDemuxer::ReadAndDemux reads from a byte stream, but we have raw bytes.
+    // Instead, parse the TS packets directly.
+    TsPacketParser parser;
+    int pos = parser.FindSyncByte(ts_data.data(), (int)ts_bytes_read, 0);
+    if (pos < 0) return false;
 
-    // Create a temporary byte stream for the TS data
-    // (TsDemuxer expects to read from a byte stream)
-    // For now, directly feed the data
-    // TODO: Use TsDemuxer's ReadAndDemux method
+    while (pos + TS_PACKET_SIZE <= (int)ts_bytes_read) {
+        TsPacket packet;
+        if (parser.ParsePacket(ts_data.data() + pos, (int)ts_bytes_read - pos, packet)) {
+            // Feed to demuxer's internal assemblers (video/audio PID)
+            // This is simplified — in production, would use demuxer's full pipeline
+        }
+        pos += TS_PACKET_SIZE;
+        // Re-align to next sync byte
+        if (pos + TS_PACKET_SIZE <= (int)ts_bytes_read) {
+            int next_sync = parser.FindSyncByte(ts_data.data(), (int)ts_bytes_read, pos);
+            if (next_sync > pos) pos = next_sync;
+            else if (next_sync < 0) break;
+        }
+    }
 
-    LeaveCriticalSection(&lock_);
-
+    // For now, return false — full integration needs proper ES data buffering
     return false;
 }
