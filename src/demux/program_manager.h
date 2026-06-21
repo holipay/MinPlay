@@ -32,6 +32,9 @@ public:
     // Get audio PID
     uint16_t GetAudioPid() const;
 
+    // Get all stream info
+    const std::vector<StreamInfo>& GetStreams() const { return streams_; }
+
     // Check if program is ready (PAT + PMT parsed)
     bool IsReady() const;
 

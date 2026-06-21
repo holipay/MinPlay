@@ -4,7 +4,9 @@
 #include <algorithm>
 
 TsDemuxer::TsDemuxer()
-    : video_pid_(0), audio_pid_(0), program_ready_(false), eos_(false) {
+    : video_pid_(0), audio_pid_(0), video_stream_type_(StreamType::Unknown),
+      audio_stream_type_(StreamType::Unknown),
+      program_ready_(false), eos_(false) {
     read_buffer_.reserve(256 * 1024);  // 256KB read buffer
 }
 
@@ -65,8 +67,15 @@ bool TsDemuxer::FeedData(const uint8_t* data, int size) {
                         video_pid_ = program_manager_.GetVideoPid();
                         audio_pid_ = program_manager_.GetAudioPid();
                         program_ready_ = true;
-                        LOG_INFO("TsDemuxer: program ready — video PID=%u, audio PID=%u",
-                                 video_pid_, audio_pid_);
+                        // Resolve stream types from ProgramManager
+                        for (const auto& s : program_manager_.GetStreams()) {
+                            if (s.pid == video_pid_ && video_pid_ > 0)
+                                video_stream_type_ = s.type;
+                            else if (s.pid == audio_pid_ && audio_pid_ > 0)
+                                audio_stream_type_ = s.type;
+                        }
+                        LOG_INFO("TsDemuxer: program ready — video PID=%u type=%d, audio PID=%u type=%d",
+                                 video_pid_, (int)video_stream_type_, audio_pid_, (int)audio_stream_type_);
                     }
                 }
             }

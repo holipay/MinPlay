@@ -33,8 +33,8 @@ constexpr int VIDEO_FILL_NETWORK = 15;  // keep 15+ frames for network
 constexpr int VIDEO_FILL_LOCAL   = 3;   // 3+ frames for local files (~100ms at 30fps)
 
 // A/V sync defaults
-constexpr double SYNC_WINDOW_DEFAULT   = 0.020;  // 20 ms tolerance
-constexpr double SYNC_WINDOW_EXCLUSIVE = 0.010;  // 10 ms for exclusive-mode WASAPI
+constexpr double SYNC_WINDOW_DEFAULT   = 0.040;  // 40 ms tolerance (network-friendly)
+constexpr double SYNC_WINDOW_EXCLUSIVE = 0.020;  // 20 ms for exclusive-mode WASAPI
 
 enum class PlayerState : int { Stopped, Opening, Playing, Paused };
 
@@ -110,7 +110,7 @@ private:
         PixelFormat pix_fmt = PixelFormat::Unknown;
     };
 
-    static constexpr int VQ_SIZE = 20;
+    static constexpr int VQ_SIZE = 32;
 
     HWND hwnd_ = nullptr;
     std::atomic<PlayerState> state_{PlayerState::Stopped};
@@ -139,6 +139,7 @@ private:
     std::atomic<double> last_video_frame_time_{0};
     std::atomic<double> last_audio_data_time_{0};
     std::atomic<double> last_restart_time_{0};
+    std::atomic<double> post_restart_until_{0};  // Grace period: don't drop frames until this time
     std::atomic<int> source_generation_{0};  // Increments on each Open(); WM_RESTART_LIVE carries this
 
     // Async open (background thread)

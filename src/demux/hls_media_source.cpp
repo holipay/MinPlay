@@ -1,23 +1,24 @@
 #include "hls_media_source.h"
+#include "hls_media_stream.h"
 #include "../network/hls_stream.h"
 #include "../util/log.h"
-
-// MEReadSample event type - MediaEventType value for signaling data availability
-#ifndef MEReadSample
-#define MEReadSample ((MediaEventType)12)
-#endif
 
 HlsMediaSource::HlsMediaSource(HlsByteStream* byte_stream)
     : byte_stream_(byte_stream), ref_count_(1),
       is_started_(false), is_shutdown_(false),
-      event_queue_(nullptr), read_thread_(nullptr), read_running_(false) {
+      event_queue_(nullptr), read_thread_(nullptr), read_running_(false),
+      video_stream_(nullptr), audio_stream_(nullptr), source_attrs_(nullptr) {
     InitializeCriticalSection(&lock_);
     if (byte_stream_) byte_stream_->AddRef();
     MFCreateEventQueue(&event_queue_);
+    MFCreateAttributes(&source_attrs_, 1);
 }
 
 HlsMediaSource::~HlsMediaSource() {
     Shutdown();
+    if (video_stream_) { video_stream_->Release(); video_stream_ = nullptr; }
+    if (audio_stream_) { audio_stream_->Release(); audio_stream_ = nullptr; }
+    if (source_attrs_) { source_attrs_->Release(); source_attrs_ = nullptr; }
     if (byte_stream_) byte_stream_->Release();
     if (event_queue_) { event_queue_->Shutdown(); event_queue_->Release(); }
     DeleteCriticalSection(&lock_);
@@ -41,6 +42,22 @@ STDMETHODIMP HlsMediaSource::QueryInterface(REFIID riid, void** ppv) {
     if (riid == IID_IUnknown || riid == IID_IMFMediaSource) {
         *ppv = static_cast<IMFMediaSource*>(this);
         AddRef();
+        return S_OK;
+    }
+    if (riid == IID_IMFMediaSourceEx) {
+        *ppv = static_cast<IMFMediaSourceEx*>(this);
+        AddRef();
+        return S_OK;
+    }
+    if (riid == IID_IMFGetService) {
+        *ppv = static_cast<IMFGetService*>(this);
+        AddRef();
+        return S_OK;
+    }
+    // IMFAttributes — SourceReader queries this on the source
+    if (riid == IID_IMFAttributes && source_attrs_) {
+        *ppv = source_attrs_;
+        source_attrs_->AddRef();
         return S_OK;
     }
     *ppv = nullptr;
@@ -68,35 +85,107 @@ STDMETHODIMP HlsMediaSource::CreatePresentationDescriptor(IMFPresentationDescrip
     if (!ppPD) return E_POINTER;
     *ppPD = nullptr;
 
-    // Create video media type
-    ComPtr<IMFMediaType> vmt;
-    HRESULT hr = MFCreateMediaType(&vmt);
-    if (FAILED(hr)) return hr;
-    vmt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    vmt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-    MFSetAttributeSize(vmt.get(), MF_MT_FRAME_SIZE, 1280, 720);
-    MFSetAttributeRatio(vmt.get(), MF_MT_FRAME_RATE, 30, 1);
-    vmt->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    vmt->SetUINT32(MF_MT_AVG_BITRATE, 2500000);
+    // Pre-scan byte stream to detect actual stream types from PAT/PMT
+    // Read first 256KB and feed to demuxer to parse TS headers
+    if (!demuxer_.HasVideo() && !demuxer_.HasAudio() && byte_stream_) {
+        const int SCAN_SIZE = 256 * 1024;
+        std::vector<uint8_t> scan_buf(SCAN_SIZE);
+        ULONG bytes_read = 0;
+        byte_stream_->Seek(MFBYTESTREAM_SEEK_ORIGIN(0), 0, 0, nullptr);
+        HRESULT hr = byte_stream_->Read(scan_buf.data(), SCAN_SIZE, &bytes_read);
+        if (SUCCEEDED(hr) && bytes_read > 0) {
+            demuxer_.FeedData(scan_buf.data(), (int)bytes_read);
+        }
+        byte_stream_->Seek(MFBYTESTREAM_SEEK_ORIGIN(0), 0, 0, nullptr);
+    }
 
-    // Create video stream descriptor
-    ComPtr<IMFStreamDescriptor> video_sd;
-    IMFMediaType* raw_mt = vmt.get();
-    hr = MFCreateStreamDescriptor(0, 1, &raw_mt, &video_sd);
-    if (FAILED(hr)) return hr;
+    std::vector<IMFStreamDescriptor*> descs;
+    ComPtr<IMFMediaType> vmt, amt;
 
-    // Create presentation descriptor with video stream
-    IMFStreamDescriptor* descs[1] = { video_sd.get() };
-    hr = MFCreatePresentationDescriptor(1, descs, ppPD);
-    if (FAILED(hr)) return hr;
+    // Create video stream descriptor if video detected
+    if (demuxer_.HasVideo()) {
+        HRESULT hr = MFCreateMediaType(&vmt);
+        if (FAILED(hr)) return hr;
+        vmt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        if (demuxer_.GetVideoStreamType() == StreamType::H264) {
+            vmt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+        } else {
+            vmt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+        }
+        MFSetAttributeSize(vmt.get(), MF_MT_FRAME_SIZE, 1920, 1080);
+        MFSetAttributeRatio(vmt.get(), MF_MT_FRAME_RATE, 30, 1);
+        vmt->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        vmt->SetUINT32(MF_MT_AVG_BITRATE, 5000000);
 
-    return S_OK;
+        ComPtr<IMFStreamDescriptor> video_sd;
+        IMFMediaType* raw_mt = vmt.get();
+        IMFMediaType* mt_arr[1] = { raw_mt };
+        HRESULT hr2 = MFCreateStreamDescriptor(0, 1, mt_arr, video_sd.GetAddress());
+        if (SUCCEEDED(hr2)) descs.push_back(video_sd.Detach());
+    }
+
+    // Create audio stream descriptor if audio detected
+    if (demuxer_.HasAudio()) {
+        HRESULT hr = MFCreateMediaType(&amt);
+        if (FAILED(hr)) return hr;
+        amt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+        StreamType at = demuxer_.GetAudioStreamType();
+        if (at == StreamType::AAC || at == StreamType::AAC_LATM) {
+            amt->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
+            amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+            amt->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
+            amt->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+            amt->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000 / 8);
+        } else if (at == StreamType::MP3) {
+            amt->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_MP3);
+            amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+            amt->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
+            amt->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+        } else {
+            return E_FAIL;
+        }
+
+        ComPtr<IMFStreamDescriptor> audio_sd;
+        IMFMediaType* raw_mt = amt.get();
+        IMFMediaType* mt_arr[1] = { raw_mt };
+        HRESULT hr2 = MFCreateStreamDescriptor(1, 1, mt_arr, audio_sd.GetAddress());
+        if (SUCCEEDED(hr2)) descs.push_back(audio_sd.Detach());
+    }
+
+    if (descs.empty()) return E_FAIL;
+
+    // Create stream objects for each descriptor
+    for (DWORD i = 0; i < (DWORD)descs.size(); i++) {
+        IMFStreamDescriptor* sd = descs[i];
+        DWORD id = 0;
+        sd->GetStreamIdentifier(&id);
+
+        HlsMediaStream* stream = new (std::nothrow) HlsMediaStream(this, id, sd);
+        if (!stream) {
+            for (auto* s : descs) s->Release();
+            return E_OUTOFMEMORY;
+        }
+
+        if (id == 0 && !video_stream_) {
+            video_stream_ = stream;
+            LOG_INFO("HlsMediaSource: created video stream (id=%lu)", id);
+        } else if (id == 1 && !audio_stream_) {
+            audio_stream_ = stream;
+            LOG_INFO("HlsMediaSource: created audio stream (id=%lu)", id);
+        }
+    }
+
+    HRESULT hr = MFCreatePresentationDescriptor((DWORD)descs.size(), descs.data(), ppPD);
+    for (auto* sd : descs) sd->Release();
+    return hr;
 }
 
 STDMETHODIMP HlsMediaSource::Start(IMFPresentationDescriptor* pPD, const GUID* pguidTimeFormat,
                                      const PROPVARIANT* pvarStartPosition) {
     if (is_started_) return E_FAIL;
     is_started_ = true;
+
+    // Start read thread
     read_running_ = true;
     read_thread_ = CreateThread(nullptr, 0, ReadThreadProc, this, 0, nullptr);
     return S_OK;
@@ -146,6 +235,32 @@ STDMETHODIMP HlsMediaSource::QueueEvent(MediaEventType met, REFGUID guidExtended
     return event_queue_->QueueEventParamVar(met, guidExtendedType, hrStatus, pvValue);
 }
 
+// IMFMediaSourceEx
+STDMETHODIMP HlsMediaSource::GetSourceAttributes(IMFAttributes** ppAttributes) {
+    if (!ppAttributes) return E_POINTER;
+    if (!source_attrs_) return E_FAIL;
+    *ppAttributes = source_attrs_;
+    source_attrs_->AddRef();
+    return S_OK;
+}
+
+STDMETHODIMP HlsMediaSource::GetStreamAttributes(DWORD dwStreamIdentifier, IMFAttributes** ppAttributes) {
+    if (!ppAttributes) return E_POINTER;
+    *ppAttributes = nullptr;
+    return E_NOTIMPL;
+}
+
+STDMETHODIMP HlsMediaSource::SetD3DManager(IUnknown* pManager) {
+    return S_OK;
+}
+
+// IMFGetService
+STDMETHODIMP HlsMediaSource::GetService(REFGUID guidService, REFIID riid, void** ppvObject) {
+    if (!ppvObject) return E_POINTER;
+    *ppvObject = nullptr;
+    return E_NOINTERFACE;
+}
+
 // Read thread
 DWORD WINAPI HlsMediaSource::ReadThreadProc(LPVOID param) {
     ((HlsMediaSource*)param)->ReadLoop();
@@ -157,11 +272,21 @@ void HlsMediaSource::ReadLoop() {
         DemuxFrame frame;
         if (demuxer_.ReadAndDemux(byte_stream_)) {
             while (demuxer_.GetNextFrame(frame)) {
-                // Queue event to notify MF that data is available
-                if (event_queue_) {
-                    event_queue_->QueueEventParamVar(MEReadSample, GUID_NULL, S_OK, nullptr);
+                if (frame.type == DemuxFrame::Video && video_stream_) {
+                    video_stream_->DeliverFrame(frame.data.data(), frame.data.size(), frame.pts);
+                } else if (frame.type == DemuxFrame::Audio && audio_stream_) {
+                    audio_stream_->DeliverFrame(frame.data.data(), frame.data.size(), frame.pts);
                 }
             }
         }
+
+        // Yield briefly to avoid spinning when no data available
+        if (!demuxer_.HasFrames()) {
+            Sleep(5);
+        }
     }
+
+    // Signal end-of-stream on both streams
+    if (video_stream_) video_stream_->SetEos();
+    if (audio_stream_) audio_stream_->SetEos();
 }

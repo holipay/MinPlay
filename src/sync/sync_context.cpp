@@ -12,13 +12,13 @@
  */
 SyncContext::SyncContext(double sync_window_sec)
     : sync_window_(sync_window_sec)
-    , drop_threshold_(sync_window_sec * 5)
-    , wait_limit_(0.200)
+    , drop_threshold_(2.0)  // 2 seconds — network streams buffer heavily, allow large drift
+    , wait_limit_(0.500)
 {}
 
 void SyncContext::SetWindow(double window_sec) {
     sync_window_ = window_sec;
-    drop_threshold_ = window_sec * 5;
+    // drop_threshold_ stays at 2.0 — intentionally large for network buffering
 }
 
 SyncDecision SyncContext::Decide(double video_pts, double audio_clk) {

@@ -284,7 +284,7 @@ IMFSourceReader* MediaSource::RecreateReader(IMFSourceReaderCallback* callback) 
     // Wait for download thread to buffer enough data before creating reader.
     // Without this, the new reader consumes the small remaining buffer in
     // seconds and hits EOF again before new segments arrive → infinite loop.
-    int64_t min_bytes = 4000000;  // ~4MB, roughly 2 segments
+    int64_t min_bytes = 2000000;  // ~2MB, roughly 1 segment — fast restart
     LOG_INFO("Waiting for data (want >= %lld bytes)...", min_bytes);
     if (!bs->WaitForDataAmount(min_bytes, 10000)) {
         int64_t cur = bs->GetTotalBytes();

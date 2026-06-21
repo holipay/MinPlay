@@ -44,6 +44,8 @@ public:
     // Get stream info
     bool HasVideo() const { return video_pid_ > 0; }
     bool HasAudio() const { return audio_pid_ > 0; }
+    StreamType GetVideoStreamType() const { return video_stream_type_; }
+    StreamType GetAudioStreamType() const { return audio_stream_type_; }
 
 private:
     TsPacketParser parser_;
@@ -54,6 +56,8 @@ private:
     // Stream state
     uint16_t video_pid_;
     uint16_t audio_pid_;
+    StreamType video_stream_type_;
+    StreamType audio_stream_type_;
     bool program_ready_;
 
     // Sync state - continuity counter tracking

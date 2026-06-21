@@ -10,8 +10,8 @@ static void test_sync_render_in_window() {
 
 static void test_sync_drop_behind_threshold() {
     SyncContext sc(0.040);
-    // diff < -drop_threshold (5*sync_window = 0.200) → Drop
-    SyncDecision d = sc.Decide(10.0, 10.3);
+    // diff < -drop_threshold (2.0) → Drop
+    SyncDecision d = sc.Decide(10.0, 12.5);
     MU_CHECK_EQ((int)d.action, (int)SyncAction::Drop);
 }
 
@@ -27,10 +27,10 @@ static void test_sync_wait_ahead_small() {
 
 static void test_sync_wait_ahead_large() {
     SyncContext sc(0.040);
-    // diff > wait_limit → Wait capped at wait_limit
+    // diff > wait_limit (0.500) → Wait capped at wait_limit
     SyncDecision d = sc.Decide(10.0, 9.5);
     MU_CHECK_EQ((int)d.action, (int)SyncAction::Wait);
-    MU_CHECK(d.wait_ms <= 200);
+    MU_CHECK(d.wait_ms <= 500);
 }
 
 static void test_sync_render_within_window_small() {
@@ -42,10 +42,10 @@ static void test_sync_render_within_window_small() {
 
 static void test_sync_threshold_edge() {
     SyncContext sc(0.040);
-    // exactly at drop threshold
-    SyncDecision d = sc.Decide(10.0, 10.200001);
+    // exactly at drop threshold (2.0)
+    SyncDecision d = sc.Decide(10.0, 12.000001);
     MU_CHECK_EQ((int)d.action, (int)SyncAction::Drop);
-    d = sc.Decide(10.0, 10.199999);
+    d = sc.Decide(10.0, 11.999999);
     MU_CHECK_EQ((int)d.action, (int)SyncAction::Render);
 }
 

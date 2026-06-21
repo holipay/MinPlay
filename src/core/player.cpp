@@ -537,7 +537,7 @@ void Player::TryRestartLivePipeline() {
 
     double now = GetTimeSec(perf_freq_);
     double last_frame = last_video_frame_time_.load(std::memory_order_acquire);
-    bool stalled = (last_frame > 0 && (now - last_frame) > 3.0);
+    bool stalled = (last_frame > 0 && (now - last_frame) > 5.0);
 
     if (!stalled) return;
 
@@ -549,7 +549,7 @@ void Player::TryRestartLivePipeline() {
     LOG_INFO("Live/VOD: pipeline stalled for %.1fs, attempting recovery", now - last_frame);
 
     double last_restart = last_restart_time_.load(std::memory_order_acquire);
-    if (last_restart > 0 && (now - last_restart) < 5.0) return;
+    if (last_restart > 0 && (now - last_restart) < 15.0) return;
     last_restart_time_.store(now, std::memory_order_release);
 
     bool expected = false;
@@ -579,7 +579,7 @@ void Player::NotifyLiveEof() {
 
     if (!audio_only_) {
         double last_restart = last_restart_time_.load(std::memory_order_acquire);
-        if (last_restart > 0 && (now - last_restart) < 2.0) return;
+        if (last_restart > 0 && (now - last_restart) < 15.0) return;
         last_restart_time_.store(now, std::memory_order_release);
     }
 
@@ -607,6 +607,8 @@ void Player::FlushAndRestart() {
     callback_->ResetAudioEof();
 
     // Clear video queue — stale frames cause fast playback after restart
+    // But keep the last rendered frame visible (frame_buf_ / frame_ready_)
+    // to avoid a black-screen freeze during the 3-4s restart window.
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
         for (int i = 0; i < VQ_SIZE; i++) {
@@ -617,14 +619,12 @@ void Player::FlushAndRestart() {
         vq_head_ = 0;
         vq_tail_ = 0;
     }
-    frame_ready_ = false;
+    // Do NOT set frame_ready_ = false — keep last frame on screen
 
-    // Reset audio ring buffer to prevent desync after restart.
-    if (!audio_only_ && ao_) {
-        ao_->Pause();
-        ao_->Reset();
-        ao_->Resume();
-    }
+    // DO NOT reset audio ring buffer — let old audio play out naturally.
+    // Resetting would cause audio clock to jump to 0 while video clock
+    // continues from old value, creating massive A/V desync.
+    // The old buffered audio will drain naturally while new data arrives.
 
     // Recreate source reader to clear MF's internal EOF state
     IMFSourceReader* new_reader = source_->RecreateReader(callback_);
@@ -638,13 +638,13 @@ void Player::FlushAndRestart() {
         return;
     }
 
-    // Reset clock so new frame timestamps match the wall clock
-    double now = GetTimeSec(perf_freq_);
-    start_time_.store(now, std::memory_order_release);
-    pause_offset_.store(0, std::memory_order_release);
-    pause_start_.store(0, std::memory_order_release);
-    last_audio_data_time_.store(now, std::memory_order_release);
+    // DO NOT reset clock — keep old start_time_ so video continues
+    // from where it left off. New reader's PTS will align with audio clock.
+    // Resetting clock causes video to start from 0 while audio is at old position,
+    // creating the "fast-forward" effect as sync rapidly drops frames.
     if (sync_) sync_->Seek();
+    // 2s grace period: don't drop frames after restart, let pipeline stabilize
+    post_restart_until_.store(GetTimeSec(perf_freq_) + 2.0, std::memory_order_release);
     video_first_frame_post_.store(1, std::memory_order_release);
     callback_->StartReading();
 
@@ -745,33 +745,47 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 
     if (vq_fmt == PixelFormat::NV12 && fh > 0 && cur_len_dw > 0) {
         // NV12 total = stride * actual_height * 3/2
-        // MF may report fh with padding (e.g. 1088 for 1080), or buffer may
-        // contain slightly more/fewer bytes than expected.  Try to recover the
-        // real stride by checking whether the buffer divides evenly.
-        size_t nv12_rows = (size_t)fh * 3 / 2;
-        if (nv12_rows > 0) {
-            size_t s = (size_t)cur_len_dw / nv12_rows;
-            if (s >= (size_t)fw && s * nv12_rows == (size_t)cur_len_dw) {
-                fs = (int)s;
-            } else {
-                // Exact division failed — the reported height may include
-                // padding rows.  Walk downward (even steps) until we find a
-                // height that divides evenly and yields a valid stride.
-                fs = 0;
-                for (int h_try = fh; h_try > 0 && h_try >= fh - 64; h_try -= 2) {
-                    size_t rows2 = (size_t)h_try * 3 / 2;
-                    if (rows2 == 0) continue;
-                    size_t s2 = (size_t)cur_len_dw / rows2;
-                    if (s2 >= (size_t)fw && s2 * rows2 == (size_t)cur_len_dw) {
-                        fs = (int)s2;
-                        break;
-                    }
+        // MF may report fh with padding (e.g. 1088 for 1080), or the player
+        // may have filtered a height change (<16px delta), leaving frame_h_
+        // smaller than the actual buffer height.  Search both downward AND
+        // upward from fh to find the correct (height, stride) pair.
+        fs = 0;
+        int found_h = fh;
+        // Try exact match first
+        {
+            size_t nv12_rows = (size_t)fh * 3 / 2;
+            if (nv12_rows > 0) {
+                size_t s = (size_t)cur_len_dw / nv12_rows;
+                if (s >= (size_t)fw && s * nv12_rows == (size_t)cur_len_dw) {
+                    fs = (int)s; found_h = fh;
                 }
-                if (fs == 0) fs = fw;  // ultimate fallback
             }
         }
-        LOG_DEBUG("NV12 stride detect: %dx%d buf=%lu → stride=%d",
-                 fw, fh, (unsigned long)cur_len_dw, fs);
+        // Search upward first (known issue: MF reports 1088 but player
+        // filters to 1080, yet buffer still has 1088 rows)
+        if (fs == 0) {
+            for (int h_try = fh + 2; h_try <= fh + 128; h_try += 2) {
+                size_t rows2 = (size_t)h_try * 3 / 2;
+                if (rows2 == 0) continue;
+                size_t s2 = (size_t)cur_len_dw / rows2;
+                if (s2 >= (size_t)fw && s2 * rows2 == (size_t)cur_len_dw) {
+                    fs = (int)s2; found_h = h_try; break;
+                }
+            }
+        }
+        // Search downward (height smaller than reported)
+        if (fs == 0) {
+            for (int h_try = fh - 2; h_try > 0 && h_try >= fh - 64; h_try -= 2) {
+                size_t rows2 = (size_t)h_try * 3 / 2;
+                if (rows2 == 0) continue;
+                size_t s2 = (size_t)cur_len_dw / rows2;
+                if (s2 >= (size_t)fw && s2 * rows2 == (size_t)cur_len_dw) {
+                    fs = (int)s2; found_h = h_try; break;
+                }
+            }
+        }
+        if (fs == 0) fs = fw;  // ultimate fallback
+        fh = found_h;  // use actual buffer height, not MF-filtered height
     }
 
     if (vq_fmt == PixelFormat::YUY2 && fw > 0 && fh > 0) {
@@ -872,8 +886,13 @@ void Player::VideoTick() {
 
     bool rendered = false;
 
+    // During post-restart grace period, force-render all frames instead of dropping
+    double now = GetTimeSec(perf_freq_);
+    bool in_grace = (now < post_restart_until_.load(std::memory_order_acquire));
+
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
+        int drops_this_tick = 0;
         while (true) {
             int head = vq_head_;
             int tail = vq_tail_;
@@ -884,12 +903,13 @@ void Player::VideoTick() {
             int next = (head + 1) % VQ_SIZE;
             bool has_more = (next != tail);
 
-            if (sd.action == SyncAction::Drop && has_more) {
+            if (sd.action == SyncAction::Drop && has_more && !in_grace && drops_this_tick < 2) {
                 free(f->data);
                 f->data = nullptr;
                 f->size = 0;
                 vq_head_ = next;
                 callback_->ConsumeVideo();
+                drops_this_tick++;
                 continue;
             }
             if (sd.action == SyncAction::Wait) {

@@ -26,6 +26,10 @@ public:
     SyncDecision Decide(double video_pts, double audio_clk);
     void Seek();
 
+    int GetDrops() const { return stat_drops_.load(std::memory_order_relaxed); }
+    int GetFrames() const { return stat_frames_.load(std::memory_order_relaxed); }
+    void ResetStats() { stat_drops_.store(0, std::memory_order_relaxed); stat_frames_.store(0, std::memory_order_relaxed); }
+
 private:
     double sync_window_;
     double drop_threshold_;
