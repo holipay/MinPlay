@@ -1,5 +1,6 @@
 #include "media_source.h"
 #include "../network/hls_stream.h"
+#include "../demux/hls_media_source.h"
 #include "../util/log.h"
 #include <propvarutil.h>
 
@@ -50,7 +51,17 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback, bo
             reader.reset();
             LOG_INFO("About to call OpenHls...");
             if (OpenHls(url)) {
-                LOG_INFO("OpenHls succeeded, creating attrs...");
+                LOG_INFO("OpenHls succeeded, creating HlsMediaSource...");
+                // Create custom IMFMediaSource that replaces MF's TS demuxer
+                // This eliminates the immutable EOF flag issue
+                ComPtr<IMFMediaSource> hls_source;
+                hr = HlsMediaSource::CreateInstance(hls_->GetByteStream(), &hls_source);
+                if (FAILED(hr)) {
+                    LOG_ERROR("HlsMediaSource::CreateInstance failed: 0x%08lX", hr);
+                    return false;
+                }
+                LOG_INFO("HlsMediaSource created successfully");
+
                 // Re-create source reader attributes
                 hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
                 if (FAILED(hr)) return false;
@@ -59,13 +70,13 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback, bo
                 if (callback) {
                     sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
                 }
-                LOG_INFO("Calling MFCreateSourceReaderFromByteStream...");
-                hr = MFCreateSourceReaderFromByteStream(
-                    hls_->GetByteStream(), sattrs.get(), &reader);
-                LOG_INFO("MFCreateSourceReaderFromByteStream returned: 0x%08lX", hr);
+                LOG_INFO("Calling MFCreateSourceReaderFromMediaSource...");
+                hr = MFCreateSourceReaderFromMediaSource(
+                    hls_source.get(), sattrs.get(), &reader);
+                LOG_INFO("MFCreateSourceReaderFromMediaSource returned: 0x%08lX", hr);
                 sattrs.reset();
                 if (FAILED(hr)) {
-                    LOG_ERROR("MFCreateSourceReaderFromByteStream failed: 0x%08lX", hr);
+                    LOG_ERROR("MFCreateSourceReaderFromMediaSource failed: 0x%08lX", hr);
                     return false;
                 }
             } else {

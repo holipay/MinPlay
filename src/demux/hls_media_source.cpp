@@ -60,9 +60,31 @@ STDMETHODIMP HlsMediaSource::GetCharacteristics(DWORD* pdwCharacteristics) {
 
 STDMETHODIMP HlsMediaSource::CreatePresentationDescriptor(IMFPresentationDescriptor** ppPD) {
     if (!ppPD) return E_POINTER;
-    // TODO: Create presentation descriptor with video/audio streams
     *ppPD = nullptr;
-    return E_NOTIMPL;
+
+    // Create video media type
+    ComPtr<IMFMediaType> vmt;
+    HRESULT hr = MFCreateMediaType(&vmt);
+    if (FAILED(hr)) return hr;
+    vmt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    vmt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+    MFSetAttributeSize(vmt.get(), MF_MT_FRAME_SIZE, 1280, 720);
+    MFSetAttributeRatio(vmt.get(), MF_MT_FRAME_RATE, 30, 1);
+    vmt->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    vmt->SetUINT32(MF_MT_AVG_BITRATE, 2500000);
+
+    // Create video stream descriptor
+    ComPtr<IMFStreamDescriptor> video_sd;
+    IMFMediaType* raw_mt = vmt.get();
+    hr = MFCreateStreamDescriptor(0, 1, &raw_mt, &video_sd);
+    if (FAILED(hr)) return hr;
+
+    // Create presentation descriptor with video stream
+    IMFStreamDescriptor* descs[1] = { video_sd.get() };
+    hr = MFCreatePresentationDescriptor(1, descs, ppPD);
+    if (FAILED(hr)) return hr;
+
+    return S_OK;
 }
 
 STDMETHODIMP HlsMediaSource::Start(IMFPresentationDescriptor* pPD, const GUID* pguidTimeFormat,
