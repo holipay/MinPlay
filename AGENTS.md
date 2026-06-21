@@ -135,3 +135,19 @@ User interaction (v0.1.1):
 | 2026-06 | HlsManager::Close TerminateThread risk | `TerminateThread(download_thread_)` used when download thread stuck in WinHTTP. Does not unwind stack, release locks, or free resources. If thread holds `seg_lock_`, future `EnterCriticalSection` deadlocks. | Store `active_request_` (WinHTTP handle) in HlsManager. `Close()` calls `WinHttpCloseHandle(active_request_)` to cancel pending HTTP operations — causes `WinHttpSendRequest`/`WinHttpReceiveResponse`/`WinHttpReadData` to fail immediately, letting the download thread exit cleanly. Remove `TerminateThread`. |
 | 2026-06 | FlushAndRestart main-thread block 15s | `FlushAndRestart()` calls `callback_->Stop()` (5s) + `RecreateReader()` → `WaitForData(10000)` (10s). Main thread frozen for up to 15 seconds. | Reduce `Stop()` timeout to 1s, `WaitForData` timeout to 2s. Total worst-case reduced to ~3s. |
 | 2026-06 | HLS network stream stops after a few minutes | (1) `cache_data_=true` for live HLS causes unbounded memory growth (consumed segments never freed). (2) Segment skip (3 failures) doesn't update `consumed_up_to_`, leaving download loop confused. (3) `FlushAndRestart` proceeds with null reader when `RecreateReader` fails, calling `StartReading()` on stale reader → immediate re-EOF → restart loop. (4) Stall detection only triggers for live/zero-duration, missing network VOD stalls. (5) For non-HLS HTTP streams, MF EOF kills the pipeline permanently with no recovery. | (1) `SetCacheData(!is_live_)` — only VOD caches data for seek-back. (2) Update `consumed_up_to_` on segment skip. (3) Abort `FlushAndRestart` if `RecreateReader` returns null → post `WM_REOPEN_SOURCE`. (4) Extend `TryRestartLivePipeline` to also trigger for `is_network_ && !is_live` → `WM_REOPEN_SOURCE`. (5) Save URL in Player; `ReopenSource()` closes everything and reopens from URL as universal stall recovery. |
+
+## Known Limitations
+
+### HLS Live Stream Stuttering (MF TS demuxer architecture)
+
+**Symptom:** Periodic stuttering every 5-10 seconds during HLS live playback. Each stutter consists of a brief video freeze (1-2s) as the pipeline restarts.
+
+**Root cause:** MF's TS demuxer (`msdatmpg.dll`) signals `MF_SOURCE_READERF_ENDOFSTREAM` when its internal buffer is empty, regardless of whether the byte stream has more data available. This is a design limitation of MF — it assumes all data is available at read time (suitable for local files, not live streams). Once EOF is set, it's immutable. The only recovery is to recreate the `IMFSourceReader`, which causes the stutter.
+
+**Evidence:** `BeginRead` returns data (e.g., 102KB), but MF still signals EOF. This confirms MF is not checking `BeginRead` return value for EOF — it's checking its own internal buffer state.
+
+**Impact:** Video freezes for 1-2 seconds every 5-10 seconds. Audio may have brief interruptions. Not a crash — playback resumes after restart.
+
+**Current mitigation:** `FlushAndRestart` recreates the source reader to clear MF's internal EOF state. `DiscardConsumedData` with TS 188-byte alignment ensures the new reader can probe the stream correctly.
+
+**Potential solution:** Replace MF's TS demuxer with FFmpeg's `libavformat` (which supports flushable EOF state and custom I/O callbacks). This is a major architectural change (2-3 days).
