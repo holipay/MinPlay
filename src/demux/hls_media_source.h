@@ -3,6 +3,7 @@
 #include "../util/com_ptr.h"
 #include <atomic>
 #include <vector>
+#include <queue>
 #include <mutex>
 #include <windows.h>
 #include <mfidl.h>
@@ -15,7 +16,11 @@ class HlsByteStream;
  *
  * Replaces MF's TS demuxer to eliminate the immutable EOF flag issue.
  * Reads TS data from HlsByteStream, parses with TsDemuxer, and provides
- * raw ES data to MF's decoders.
+ * raw ES data (H.264/AAC) to MF's decoders.
+ *
+ * Key design: never signals EOF for live streams. The byte stream's
+ * BeginRead blocks until new data arrives, preventing MF from setting
+ * its immutable internal EOF flag.
  */
 class HlsMediaSource : public IMFMediaSource {
 public:
@@ -35,12 +40,16 @@ public:
     STDMETHODIMP Pause() override;
     STDMETHODIMP Shutdown() override;
 
-    // IMFMediaEventGenerator (required by IMFMediaSource)
+    // IMFMediaEventGenerator
     STDMETHODIMP BeginGetEvent(IMFAsyncCallback* pCallback, IUnknown* pState) override;
     STDMETHODIMP EndGetEvent(IMFAsyncResult* pResult, IMFMediaEvent** ppEvent) override;
     STDMETHODIMP GetEvent(DWORD dwFlags, IMFMediaEvent** ppEvent) override;
     STDMETHODIMP QueueEvent(MediaEventType met, REFGUID guidExtendedType,
                             HRESULT hrStatus, const PROPVARIANT* pvValue) override;
+
+    // Called by internal threads to deliver samples
+    void DeliverVideoSample(const uint8_t* data, int size, double pts);
+    void DeliverAudioSample(const uint8_t* data, int size, double pts);
 
 private:
     HlsMediaSource(HlsByteStream* byte_stream);
@@ -53,4 +62,20 @@ private:
     CRITICAL_SECTION lock_;
     bool is_started_;
     bool is_shutdown_;
+
+    // Sample queue
+    struct QueuedSample {
+        DWORD stream_index;
+        IMFSample* sample;
+        double pts;
+    };
+    std::queue<QueuedSample> sample_queue_;
+    CRITICAL_SECTION queue_lock_;
+
+    // Read thread
+    HANDLE read_thread_;
+    bool read_running_;
+
+    static DWORD WINAPI ReadThreadProc(LPVOID param);
+    void ReadLoop();
 };

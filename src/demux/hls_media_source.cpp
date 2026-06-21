@@ -4,8 +4,9 @@
 
 HlsMediaSource::HlsMediaSource(HlsByteStream* byte_stream)
     : byte_stream_(byte_stream), ref_count_(1),
-      is_started_(false), is_shutdown_(false) {
+      is_started_(false), is_shutdown_(false), read_thread_(nullptr), read_running_(false) {
     InitializeCriticalSection(&lock_);
+    InitializeCriticalSection(&queue_lock_);
     if (byte_stream_) byte_stream_->AddRef();
 }
 
@@ -13,6 +14,7 @@ HlsMediaSource::~HlsMediaSource() {
     Shutdown();
     if (byte_stream_) byte_stream_->Release();
     DeleteCriticalSection(&lock_);
+    DeleteCriticalSection(&queue_lock_);
 }
 
 HRESULT HlsMediaSource::CreateInstance(HlsByteStream* byte_stream, IMFMediaSource** ppSource) {
@@ -59,6 +61,7 @@ STDMETHODIMP HlsMediaSource::GetCharacteristics(DWORD* pdwCharacteristics) {
 STDMETHODIMP HlsMediaSource::CreatePresentationDescriptor(IMFPresentationDescriptor** ppPD) {
     if (!ppPD) return E_POINTER;
     // TODO: Create presentation descriptor with video/audio streams
+    *ppPD = nullptr;
     return E_NOTIMPL;
 }
 
@@ -66,10 +69,18 @@ STDMETHODIMP HlsMediaSource::Start(IMFPresentationDescriptor* pPD, const GUID* p
                                      const PROPVARIANT* pvarStartPosition) {
     if (is_started_) return E_FAIL;
     is_started_ = true;
+    read_running_ = true;
+    read_thread_ = CreateThread(nullptr, 0, ReadThreadProc, this, 0, nullptr);
     return S_OK;
 }
 
 STDMETHODIMP HlsMediaSource::Stop() {
+    read_running_ = false;
+    if (read_thread_) {
+        WaitForSingleObject(read_thread_, 5000);
+        CloseHandle(read_thread_);
+        read_thread_ = nullptr;
+    }
     return S_OK;
 }
 
@@ -80,6 +91,7 @@ STDMETHODIMP HlsMediaSource::Pause() {
 STDMETHODIMP HlsMediaSource::Shutdown() {
     if (is_shutdown_) return S_OK;
     is_shutdown_ = true;
+    Stop();
     return S_OK;
 }
 
@@ -99,4 +111,36 @@ STDMETHODIMP HlsMediaSource::GetEvent(DWORD dwFlags, IMFMediaEvent** ppEvent) {
 STDMETHODIMP HlsMediaSource::QueueEvent(MediaEventType met, REFGUID guidExtendedType,
                                          HRESULT hrStatus, const PROPVARIANT* pvValue) {
     return S_OK;
+}
+
+// Sample delivery
+void HlsMediaSource::DeliverVideoSample(const uint8_t* data, int size, double pts) {
+    // TODO: Create IMFMediaSample and queue it
+    LOG_DEBUG("HlsMediaSource: video sample %d bytes, pts=%.3f", size, pts);
+}
+
+void HlsMediaSource::DeliverAudioSample(const uint8_t* data, int size, double pts) {
+    // TODO: Create IMFMediaSample and queue it
+    LOG_DEBUG("HlsMediaSource: audio sample %d bytes, pts=%.3f", size, pts);
+}
+
+// Read thread
+DWORD WINAPI HlsMediaSource::ReadThreadProc(LPVOID param) {
+    ((HlsMediaSource*)param)->ReadLoop();
+    return 0;
+}
+
+void HlsMediaSource::ReadLoop() {
+    while (read_running_) {
+        DemuxFrame frame;
+        if (demuxer_.ReadAndDemux(byte_stream_)) {
+            while (demuxer_.GetNextFrame(frame)) {
+                if (frame.type == DemuxFrame::Video) {
+                    DeliverVideoSample(frame.data.data(), (int)frame.data.size(), frame.pts);
+                } else if (frame.type == DemuxFrame::Audio) {
+                    DeliverAudioSample(frame.data.data(), (int)frame.data.size(), frame.pts);
+                }
+            }
+        }
+    }
 }
