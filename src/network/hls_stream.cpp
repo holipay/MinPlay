@@ -819,9 +819,23 @@ bool HlsManager::Open(const wchar_t* url) {
     }
     byte_stream_->SetCacheData(true);
 
-    // Synchronous pre-buffer: download first 3 segments so MF can probe TS
-    // container format from the byte stream before source reader creation.
-    int prebuf_count = (std::min)(1, (int)segments_.size());
+    // Start download thread FIRST so it can download in parallel with pre-buffer.
+    // The download thread skips segments already consumed by pre-buffer.
+    LOG_INFO("HLS: Starting download thread early for parallel pre-buffer...");
+    download_thread_ = CreateThread(nullptr, 0,
+        [](LPVOID arg) -> DWORD {
+            ((HlsManager*)arg)->DownloadLoop();
+            return 0;
+        }, this, 0, nullptr);
+    if (!download_thread_) {
+        LOG_CRITICAL("Failed to create download thread");
+        download_running_ = false;
+        return false;
+    }
+
+    // Synchronous pre-buffer: download first segments so MF has enough data
+    // to probe TS format AND start demuxing immediately.
+    int prebuf_count = (std::min)(5, (int)segments_.size());
     LOG_INFO("HLS: Pre-buffering %d segments...", prebuf_count);
     for (int i = 0; i < prebuf_count; i++) {
         std::vector<uint8_t> seg_data;
@@ -835,22 +849,7 @@ bool HlsManager::Open(const wchar_t* url) {
         consumed_up_to_.store(i + 1, std::memory_order_release);
         next_segment_to_download_.store(i + 1, std::memory_order_release);
     }
-    LOG_INFO("HLS: Pre-buffer done, starting download thread...");
-
-    // Start background download thread for remaining segments.
-    // Use consumed_up_to_ (not prebuf_count) so that failed pre-buffer
-    // segments are re-attempted by the download loop.
-    next_segment_to_download_ = consumed_up_to_.load();
-    download_thread_ = CreateThread(nullptr, 0,
-        [](LPVOID arg) -> DWORD {
-            ((HlsManager*)arg)->DownloadLoop();
-            return 0;
-        }, this, 0, nullptr);
-    if (!download_thread_) {
-        LOG_CRITICAL("Failed to create download thread");
-        download_running_ = false;
-        return false;
-    }
+    LOG_INFO("HLS: Pre-buffer done");
 
     return true;
 }
@@ -961,9 +960,11 @@ void HlsManager::DownloadLoop() {
                     WaitForSingleObject(wake_event_, 1000);
                     continue;
                 }
-                // Live — reload playlist and wait for new segments
+                // Live — reload playlist, then immediately download new segments.
+                // Don't wait target_duration_ here — ReloadPlaylist already
+                // fetched the latest playlist, and the download loop will
+                // immediately download any new segments.
                 ReloadPlaylist();
-                WaitForSingleObject(wake_event_, (DWORD)(target_duration_ * 1000));
                 continue;
             }
         }
