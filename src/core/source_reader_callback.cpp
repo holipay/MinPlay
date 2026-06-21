@@ -61,7 +61,7 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
     (void)gen;
 
     if (FAILED(hrStatus) || (dwStreamFlags & MF_SOURCE_READERF_ERROR)) {
-        LOG_WARN("OnReadSample failed stream=%lu hr=0x%08lX flags=0x%08lX",
+        LOG_WARN("OnReadSample FAILED stream=%lu hr=0x%08lX flags=0x%08lX",
                  dwStreamIndex, hrStatus, dwStreamFlags);
         // Do NOT call reader_->Flush() here — FlushAndRestart() on the main
         // thread also calls Flush(), and concurrent Flush() calls deadlock on
@@ -75,20 +75,19 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
     }
 
     if (dwStreamFlags & MF_SOURCE_READERF_ENDOFSTREAM) {
-        LOG_DEBUG("EOF stream=%lu%s", dwStreamIndex, self->is_live_ ? " (live)" : "");
         if (self->is_live_) {
-            // Live stream: MF's TS demuxer signaled EOF after consuming its buffer.
-            // Do NOT re-request here — it just loops back to EOF instantly.
-            // Set EOF flags so VideoTick/CheckAudio stop requesting and stall
-            // detection can trigger a pipeline restart.
+            // MF's TS demuxer sets an IMMUTABLE internal EOF flag once it
+            // sees 0 bytes from the byte stream. ReadSample will return EOF
+            // forever after that — re-requesting just loops. Must recreate
+            // the source reader to clear MF's internal state.
             if (dwStreamIndex == self->video_stream_)
                 self->video_eof_.store(true, std::memory_order_release);
             else if (dwStreamIndex == self->audio_stream_)
                 self->audio_eof_.store(true, std::memory_order_release);
-            // Notify player to attempt immediate restart
             Player* p = self->player_.load(std::memory_order_acquire);
             if (p) p->NotifyLiveEof();
         } else {
+            LOG_DEBUG("EOF stream=%lu", dwStreamIndex);
             if (dwStreamIndex == self->video_stream_)
                 self->video_eof_.store(true, std::memory_order_release);
             else if (dwStreamIndex == self->audio_stream_)

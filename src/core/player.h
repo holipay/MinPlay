@@ -22,6 +22,7 @@
 #define WM_RESTART_LIVE     (WM_APP + 1)
 #define WM_OPEN_COMPLETE    (WM_APP + 2)
 #define WM_PLAYLIST_DONE    (WM_APP + 3)
+#define WM_REOPEN_SOURCE    (WM_APP + 4)
 
 // Audio buffering thresholds
 constexpr int AUDIO_BUFFER_NETWORK_MULT = 5;   // 5 × bitrate for network (5 s buffer)
@@ -73,10 +74,12 @@ public:
     bool HasVideo() const { return has_video_; }
     bool HasAudio() const { return has_audio_; }
     bool IsAudioOnly() const { return audio_only_; }
+    bool IsNetwork() const { return is_network_; }
     double GetVideoFps() const { return video_fps_.load(std::memory_order_relaxed); }
     bool IsFinished() const;
     void OnVideoFormatChanged();
     void FlushAndRestart();
+    void ReopenSource();
     void NotifyLiveEof();
 
     // Playlist support
@@ -125,6 +128,7 @@ private:
     bool is_network_ = false;
     bool is_fullscreen_ = false;
     int audio_bytes_per_sec_ = 0;
+    std::wstring saved_url_;
     std::atomic<double> video_fps_{30.0};
 
     LARGE_INTEGER perf_freq_{};

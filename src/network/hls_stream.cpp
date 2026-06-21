@@ -351,6 +351,23 @@ bool HlsByteStream::WaitForData(DWORD timeout_ms) {
     return HasUnreadData();
 }
 
+bool HlsByteStream::WaitForDataAmount(int64_t min_bytes, DWORD timeout_ms) {
+    if (total_bytes_.load(std::memory_order_acquire) - read_pos_.load(std::memory_order_acquire) >= min_bytes)
+        return true;
+    if (!data_event_) return false;
+    DWORD elapsed = 0;
+    DWORD step = 500;
+    while (elapsed < timeout_ms) {
+        ResetEvent(data_event_);
+        DWORD wait_time = (std::min)(step, timeout_ms - elapsed);
+        (void)WaitForSingleObject(data_event_, wait_time);
+        elapsed += wait_time;
+        if (total_bytes_.load(std::memory_order_acquire) - read_pos_.load(std::memory_order_acquire) >= min_bytes)
+            return true;
+    }
+    return false;
+}
+
 void HlsByteStream::Clear() {
     LOG_WARN("HlsBS: Clear() called — total_bytes was %lld", total_bytes_.load());
     EnterCriticalSection(&lock_);
@@ -377,13 +394,12 @@ void HlsByteStream::ResetForRestart() {
 }
 
 /*
- * Discard segments that have already been fully consumed by MF.
- * This is used before recreating the source reader for live HLS restart
- * so the new reader only sees new (unread) data instead of replaying
- * old segments from position 0.
+ * Discard segments that have already been consumed by MF.
+ * Aligns the cut point to a TS packet boundary (188 bytes, sync byte 0x47)
+ * so the new source reader can correctly probe the TS container format.
  *
  * After discarding, read_pos_ is reset to 0 and remaining segment offsets
- * are shifted so the byte stream starts fresh from the first unread byte.
+ * are shifted so the byte stream starts fresh from a TS packet boundary.
  */
 void HlsByteStream::DiscardConsumedData() {
     EnterCriticalSection(&lock_);
@@ -395,24 +411,56 @@ void HlsByteStream::DiscardConsumedData() {
         return;
     }
 
-    // Find first segment that contains or is after read_pos_
+    // Align pos down to nearest 188-byte TS packet boundary
+    int64_t aligned_pos = (pos / 188) * 188;
+
+    // Scan for 0x47 sync byte at aligned position to confirm TS alignment.
+    // If not found, try the next boundary (up to 188 bytes ahead).
+    bool found_sync = false;
+    for (int try_offset = 0; try_offset < 188; try_offset += 188) {
+        int64_t candidate = aligned_pos + try_offset;
+        // Search through segments to find the byte at candidate position
+        for (auto& s : segs_) {
+            if (candidate >= s.offset && candidate < s.offset + (int64_t)s.data.size()) {
+                int64_t idx_in_seg = candidate - s.offset;
+                if (s.data.size() > (size_t)idx_in_seg && s.data[(size_t)idx_in_seg] == 0x47) {
+                    aligned_pos = candidate;
+                    found_sync = true;
+                    break;
+                }
+            }
+        }
+        if (found_sync) break;
+    }
+    if (!found_sync) {
+        // Fallback: use 188-byte alignment even without confirmed sync byte
+        LOG_WARN("HlsBS: DiscardConsumedData — no 0x47 sync found, using 188-byte alignment");
+    }
+
+    // Find first segment that contains or is after aligned_pos
     size_t keep_from = 0;
     while (keep_from < segs_.size()) {
         auto& s = segs_[keep_from];
-        if (s.offset + (int64_t)s.data.size() > pos) {
-            // This segment has unread data — keep it
+        if (s.offset + (int64_t)s.data.size() > aligned_pos) {
             break;
         }
         keep_from++;
     }
 
-    if (keep_from == 0) {
+    if (keep_from == 0 && aligned_pos <= 0) {
         LeaveCriticalSection(&lock_);
-        LOG_DEBUG("HlsBS: DiscardConsumedData — no segments to discard");
+        LOG_DEBUG("HlsBS: DiscardConsumedData — nothing to discard");
         return;
     }
 
     int64_t discard_bytes = (keep_from < segs_.size()) ? segs_[keep_from].offset : total_bytes_.load(std::memory_order_relaxed);
+
+    // Calculate how many bytes to skip within the first kept segment
+    int64_t skip_in_first = 0;
+    if (keep_from < segs_.size()) {
+        skip_in_first = aligned_pos - segs_[keep_from].offset;
+        if (skip_in_first < 0) skip_in_first = 0;
+    }
 
     // Shift remaining segments' offsets to start from 0
     int64_t new_offset = 0;
@@ -421,16 +469,16 @@ void HlsByteStream::DiscardConsumedData() {
         new_offset += segs_[i].data.size();
     }
 
-    // Erase consumed segments
+    // Erase fully consumed segments
     segs_.erase(segs_.begin(), segs_.begin() + keep_from);
-    if (segs_.capacity() > 64) segs_.shrink_to_fit();  // Release excess capacity
+    if (segs_.capacity() > 64) segs_.shrink_to_fit();
 
     total_bytes_.store(new_offset, std::memory_order_relaxed);
     read_pos_ = 0;
 
     LeaveCriticalSection(&lock_);
-    LOG_INFO("HlsBS: DiscardConsumedData — discarded %zu segments (%lld bytes), %zu segments remaining, total_bytes=%lld",
-             keep_from, discard_bytes, segs_.size(), new_offset);
+    LOG_INFO("HlsBS: DiscardConsumedData — discarded to TS-aligned pos %lld (was %lld), %zu segments remaining, total_bytes=%lld",
+             aligned_pos, pos, segs_.size(), new_offset);
 }
 
 void HlsByteStream::SetEndOfStream() {
@@ -769,7 +817,7 @@ bool HlsManager::Open(const wchar_t* url) {
         LOG_CRITICAL("Out of memory: HlsByteStream");
         return false;
     }
-    byte_stream_->SetCacheData(true);  // Keep data to prevent EOF stall
+    byte_stream_->SetCacheData(true);
 
     // Synchronous pre-buffer: download first 3 segments so MF can probe TS
     // container format from the byte stream before source reader creation.
@@ -935,6 +983,7 @@ void HlsManager::DownloadLoop() {
             retry_count++;
             if (retry_count >= 3) {
                 LOG_WARN("HLS: Skipping segment %d after %d failures", idx, 3);
+                consumed_up_to_.store(idx + 1, std::memory_order_release);
                 next_segment_to_download_.store(idx + 1, std::memory_order_release);
                 retry_count = 0;
                 continue;
@@ -999,9 +1048,12 @@ HlsByteStream* HlsManager::GetByteStream() {
 
 void HlsManager::ResetDownloadState() {
     LOG_INFO("HLS: Resetting download state for pipeline restart");
-    next_segment_to_download_.store(0, std::memory_order_release);
-    consumed_up_to_.store(0, std::memory_order_release);
+    int seg_count;
+    EnterCriticalSection(&seg_lock_);
+    seg_count = (int)segments_.size();
+    LeaveCriticalSection(&seg_lock_);
+    next_segment_to_download_.store(seg_count, std::memory_order_release);
+    consumed_up_to_.store(seg_count, std::memory_order_release);
     eos_sent_ = false;
-    // Wake download thread to start re-downloading
     if (wake_event_) SetEvent(wake_event_);
 }

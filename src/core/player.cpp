@@ -61,6 +61,7 @@ bool Player::Open(HWND hwnd, const wchar_t* url, bool audio_only) {
     Close();
     hwnd_ = hwnd;
     audio_only_ = audio_only;
+    saved_url_ = url;
 
     callback_ = new (std::nothrow) SourceReaderCallback();
     if (!callback_) {
@@ -309,7 +310,15 @@ void Player::PauseToggle() {
     if (state_.load(std::memory_order_acquire) == PlayerState::Playing) {
         state_.store(PlayerState::Paused, std::memory_order_release);
         pause_start_.store(GetTimeSec(perf_freq_), std::memory_order_release);
-        if (callback_) callback_->Stop();
+    if (callback_) {
+        callback_->Stop();
+        // Wait for any in-flight OnReadSample to finish (may hold stale ao_ pointer)
+        DWORD wait_start = GetTickCount();
+        while (callback_->IsBusy() && (GetTickCount() - wait_start) < 3000) {
+            Sleep(10);
+        }
+        callback_->ClearPointers();
+    }
         if (ao_) ao_->Pause();
         StopVideoTimer();
     } else if (state_.load(std::memory_order_acquire) == PlayerState::Paused) {
@@ -519,48 +528,54 @@ uint8_t* Player::ConvertI420ToNV12(const uint8_t* i420, int w, int h) {
 }
 
 void Player::TryRestartLivePipeline() {
-    if (!source_ || !(source_->IsLive() || source_->Duration() <= 0) || !callback_) return;
+    if (!source_ || !callback_) return;
 
-    // Only restart if truly stalled: no video frames for 3+ seconds
+    bool is_live_or_unknown = source_->IsLive() || source_->Duration() <= 0;
+    bool is_network_vod = is_network_ && !is_live_or_unknown;
+
+    if (!is_live_or_unknown && !is_network_vod) return;
+
     double now = GetTimeSec(perf_freq_);
     double last_frame = last_video_frame_time_.load(std::memory_order_acquire);
     bool stalled = (last_frame > 0 && (now - last_frame) > 3.0);
 
     if (!stalled) return;
 
-    // Require new data available before restarting
-    if (!source_->HlsByteStreamHasData()) return;
-    if (!source_->HasNewHlsData()) return;
+    if (is_live_or_unknown) {
+        if (!source_->HlsByteStreamHasData()) return;
+        if (!source_->HasNewHlsData()) return;
+    }
 
-    LOG_INFO("Live: pipeline stalled for %.1fs, attempting restart", now - last_frame);
+    LOG_INFO("Live/VOD: pipeline stalled for %.1fs, attempting recovery", now - last_frame);
 
-    // Cooldown: don't restart more than once every 5 seconds
     double last_restart = last_restart_time_.load(std::memory_order_acquire);
     if (last_restart > 0 && (now - last_restart) < 5.0) return;
     last_restart_time_.store(now, std::memory_order_release);
 
-    // Prevent concurrent restart
     bool expected = false;
     if (!live_restarting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
 
+    live_restarting_.store(false, std::memory_order_release);
     PostMessage(hwnd_, WM_RESTART_LIVE, 0, source_generation_.load(std::memory_order_relaxed));
 }
 
 void Player::NotifyLiveEof() {
     if (!source_ || !source_->IsLive() || !callback_) return;
 
-    // For video: require data available before restarting.
-    // For audio-only: always restart — RecreateReader's WaitForData handles the gap.
-    if (!audio_only_) {
-        if (!source_->HlsByteStreamHasData()) return;
-        if (!source_->HasNewHlsData()) return;
-    }
-
-    // Don't post if a restart is already pending
     if (live_restarting_.load(std::memory_order_acquire)) return;
 
     double now = GetTimeSec(perf_freq_);
+    double last_frame = last_video_frame_time_.load(std::memory_order_acquire);
+    bool long_stall = (last_frame > 0 && (now - last_frame) > 8.0);
+
+    if (!audio_only_) {
+        if (!source_->HlsByteStreamHasData()) {
+            if (!long_stall) return;
+        } else if (!source_->HasNewHlsData()) {
+            if (!long_stall) return;
+        }
+    }
 
     if (!audio_only_) {
         double last_restart = last_restart_time_.load(std::memory_order_acquire);
@@ -568,6 +583,7 @@ void Player::NotifyLiveEof() {
         last_restart_time_.store(now, std::memory_order_release);
     }
 
+    // Always use FlushAndRestart — never ReopenSource
     LOG_INFO("Live: EOF, immediate restart%s", audio_only_ ? " (audio-only)" : "");
     int gen = source_generation_.load(std::memory_order_relaxed);
     PostMessage(hwnd_, WM_RESTART_LIVE, 0, gen);
@@ -603,9 +619,7 @@ void Player::FlushAndRestart() {
     }
     frame_ready_ = false;
 
-    // For video: reset audio ring buffer to prevent desync after restart.
-    // For audio-only: skip reset — let the ring buffer drain naturally during
-    // restart so WASAPI keeps playing buffered audio, avoiding silence gap.
+    // Reset audio ring buffer to prevent desync after restart.
     if (!audio_only_ && ao_) {
         ao_->Pause();
         ao_->Reset();
@@ -618,9 +632,13 @@ void Player::FlushAndRestart() {
         callback_->SetReader(new_reader,
                              source_->GetVideoStream(),
                              source_->GetAudioStream());
+    } else {
+        LOG_WARN("Live: RecreateReader failed, will retry later");
+        live_restarting_.store(false, std::memory_order_release);
+        return;
     }
 
-    // Reset clock so new frame timestamps (~0) match the wall clock
+    // Reset clock so new frame timestamps match the wall clock
     double now = GetTimeSec(perf_freq_);
     start_time_.store(now, std::memory_order_release);
     pause_offset_.store(0, std::memory_order_release);
@@ -632,6 +650,63 @@ void Player::FlushAndRestart() {
 
     LOG_INFO("Live: pipeline restarted");
     live_restarting_.store(false, std::memory_order_release);
+}
+
+void Player::ReopenSource() {
+    if (saved_url_.empty()) {
+        LOG_ERROR("ReopenSource: no saved URL");
+        return;
+    }
+    if (state_.load(std::memory_order_acquire) != PlayerState::Playing) return;
+
+    LOG_INFO("ReopenSource: closing and reopening from %S", saved_url_.c_str());
+
+    state_.store(PlayerState::Opening, std::memory_order_release);
+
+    StopVideoTimer();
+    if (hwnd_) {
+        KillTimer(hwnd_, TIMER_AUDIO_CHECK);
+        KillTimer(hwnd_, TIMER_EOF_CHECK);
+    }
+
+    if (callback_) callback_->Stop();
+
+    if (ao_) {
+        ao_->Pause();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(vq_mutex_);
+        for (int i = 0; i < VQ_SIZE; i++) {
+            free(vq_[i].data);
+            vq_[i].data = nullptr;
+            vq_[i].size = 0;
+        }
+        vq_head_ = 0;
+        vq_tail_ = 0;
+    }
+    frame_ready_ = false;
+
+    if (callback_) callback_->ClearPointers();
+
+    delete vo_;       vo_ = nullptr;
+    delete ao_;       ao_ = nullptr;
+    delete sync_;     sync_ = nullptr;
+
+    if (source_) { source_->Close(); delete source_; source_ = nullptr; }
+    if (callback_) { callback_->Release(); callback_ = nullptr; }
+
+    if (open_thread_.joinable())
+        open_thread_.join();
+
+    open_generation_.fetch_add(1, std::memory_order_relaxed);
+    source_generation_.fetch_add(1, std::memory_order_relaxed);
+    open_running_ = true;
+    int gen = open_generation_.load(std::memory_order_relaxed);
+    LOG_INFO("ReopenSource: starting open thread (gen=%d)", gen);
+    open_thread_ = std::thread([this, gen]() {
+        OpenAsync(saved_url_, audio_only_, gen);
+    });
 }
 
 void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
@@ -921,7 +996,7 @@ void Player::CheckAudio() {
             double last_data = last_audio_data_time_.load(std::memory_order_acquire);
             if (last_data > 0 && (now - last_data) >= 1.0) {
                 LOG_INFO("Audio-only live: stall fallback (no data for %.1fs)", now - last_data);
-                PostMessage(hwnd_, WM_RESTART_LIVE, 0, 0);
+                PostMessage(hwnd_, WM_RESTART_LIVE, 0, source_generation_.load(std::memory_order_relaxed));
                 last_audio_data_time_.store(now, std::memory_order_release);
             }
         }

@@ -236,24 +236,21 @@ IMFSourceReader* MediaSource::RecreateReader(IMFSourceReaderCallback* callback) 
 
     LOG_INFO("Recreating source reader from byte stream");
 
-    // Hold extra reference on byte stream to prevent destruction during recreation
     HlsByteStream* bs = hls_->GetByteStream();
     bs->AddRef();
 
-    // Discard old consumed segments so the new reader doesn't replay them
+    // Discard consumed data, aligned to 188-byte TS packet boundaries
     bs->DiscardConsumedData();
 
-    // Wait for new data before creating reader — MFCreateSourceReaderFromByteStream
-    // blocks the main thread while the TS demuxer probes the byte stream.
-    // If the byte stream is empty, BeginRead blocks until data arrives.
-    // 2s timeout keeps main thread responsive; stall detection retries if needed.
-    if (!bs->HasUnreadData()) {
-        LOG_INFO("Waiting for new segment data...");
-        if (!bs->WaitForData(2000)) {
-            LOG_WARN("No data after 2s, aborting reader recreation");
-            bs->Release();
-            return nullptr;
-        }
+    // Wait for download thread to buffer enough data before creating reader.
+    // Without this, the new reader consumes the small remaining buffer in
+    // seconds and hits EOF again before new segments arrive → infinite loop.
+    int64_t min_bytes = 4000000;  // ~4MB, roughly 2 segments
+    LOG_INFO("Waiting for data (want >= %lld bytes)...", min_bytes);
+    if (!bs->WaitForDataAmount(min_bytes, 10000)) {
+        int64_t cur = bs->GetTotalBytes();
+        LOG_WARN("Only %lld bytes after 10s, proceeding anyway", cur);
+    } else {
         LOG_INFO("Data available, continuing recreation");
     }
 

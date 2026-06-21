@@ -195,7 +195,6 @@ DWORD WasapiAudioOutput::PlaybackThreadProc() {
         DWORD wr = WaitForSingleObject(event_, 200);
         if (!playing_) break;
 
-        // Check if audio device changed (e.g. headphone plugged in)
         if (device_changed_.exchange(false, std::memory_order_acquire)) {
             if (!ReinitDevice()) {
                 LOG_ERROR("WASAPI: device reinit failed, continuing with old device");
@@ -205,7 +204,6 @@ DWORD WasapiAudioOutput::PlaybackThreadProc() {
 
         if (wr != WAIT_OBJECT_0) continue;
 
-        // Periodic warning for ring buffer overflow
         int64_t df = dropped_frames_.load(std::memory_order_relaxed);
         if (df > 0 && (++drop_warn_interval % 50) == 0) {
             LOG_WARN("Audio ring overflow: %lld bytes dropped (buffer full)", df);
@@ -213,10 +211,7 @@ DWORD WasapiAudioOutput::PlaybackThreadProc() {
 
         UINT32 padding = 0;
         HRESULT hr = client_->GetCurrentPadding(&padding);
-        if (FAILED(hr)) {
-            // Client may be momentarily stopped during seek/reset — retry on next wake
-            continue;
-        }
+        if (FAILED(hr)) continue;
         UINT32 frames = buffer_frames_ - padding;
         if (frames == 0) continue;
 
@@ -388,7 +383,7 @@ bool WasapiAudioOutput::Initialize(int sample_rate, int channels, int bits) {
 WasapiAudioOutput::~WasapiAudioOutput() {
     playing_ = false;
     if (event_) SetEvent(event_);
-    if (thread_) { WaitForSingleObject(thread_, 1000); CloseHandle(thread_); }
+    if (thread_) { WaitForSingleObject(thread_, 3000); CloseHandle(thread_); }
     if (dev_enum_) {
         dev_enum_->UnregisterEndpointNotificationCallback(this);
         dev_enum_->Release();

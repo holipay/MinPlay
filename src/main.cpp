@@ -7,8 +7,18 @@
 #include <cwchar>
 #include <string>
 
+FILE* g_log_file = nullptr;
+
 static Player* g_player = nullptr;
 static HWND    g_hwnd   = nullptr;
+static LONG WINAPI GlobalExceptionHandler(EXCEPTION_POINTERS* ep) {
+    DWORD code = ep ? ep->ExceptionRecord->ExceptionCode : 0;
+    void* addr = ep ? ep->ExceptionRecord->ExceptionAddress : nullptr;
+    LOG_ERROR("Unhandled exception: 0x%08lX at %p", code, addr);
+    if (g_log_file) fflush(g_log_file);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 static int RunMessageLoop();
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -230,6 +240,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_player->VideoTick();
             if (wp == TIMER_EOF_CHECK && g_player) {
                 if (g_player->IsFinished()) {
+                    LOG_INFO("IsFinished() returned true, closing");
                     if (g_player->HasPlaylist()) {
                         g_player->OnTrackFinished();
                         // Re-arm EOF timer for next track
@@ -279,16 +290,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
 
         case WM_RESTART_LIVE:
-            if (g_player && (int)lp == g_player->GetSourceGeneration())
+            if (g_player)
                 g_player->FlushAndRestart();
             break;
 
+        case WM_REOPEN_SOURCE:
+            if (g_player)
+                g_player->ReopenSource();
+            break;
+
         case WM_PLAYLIST_DONE:
+            LOG_INFO("WM_PLAYLIST_DONE received");
             KillTimer(hwnd, TIMER_EOF_CHECK);
             DestroyWindow(hwnd);
             break;
 
         case WM_DESTROY:
+            LOG_INFO("WM_DESTROY received");
             PostQuitMessage(0);
             break;
 
@@ -343,7 +361,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     freopen_s(&dummy, "CONOUT$", "w", stdout);
 #endif
 
+    fopen_s(&g_log_file, "minplay.log", "w");
+    if (g_log_file) LOG_INFO("MinPlay starting (log file: minplay.log)");
+
     ApplyProcessMitigations();
+
+    SetUnhandledExceptionFilter(GlobalExceptionHandler);
 
     ComInit com;
     HRESULT hrMf = MFStartup(MF_VERSION, 0);
@@ -449,14 +472,18 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
     int ret = RunMessageLoop();
 
+    LOG_INFO("Message loop ended, cleaning up (ret=%d)", ret);
     KillTimer(g_hwnd, TIMER_AUDIO_CHECK);
     KillTimer(g_hwnd, TIMER_VIDEO_DISPLAY);
     KillTimer(g_hwnd, TIMER_EOF_CHECK);
     KillTimer(g_hwnd, TIMER_CLICK_DELAY);
     KillTimer(g_hwnd, TIMER_OSD_REFRESH);
     delete g_player;
+    g_player = nullptr;
 
     MFShutdown();
+    LOG_INFO("MinPlay exiting");
+    if (g_log_file) { fclose(g_log_file); g_log_file = nullptr; }
     return ret;
 }
 
@@ -476,7 +503,9 @@ static int RunMessageLoop() {
     }
     return 0;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        LOG_ERROR("SEH exception: 0x%08lX", GetExceptionCode());
+        DWORD code = GetExceptionCode();
+        LOG_ERROR("SEH exception: 0x%08lX", code);
+        if (g_log_file) fflush(g_log_file);
         return 1;
     }
 }
