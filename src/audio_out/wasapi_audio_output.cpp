@@ -312,48 +312,73 @@ bool WasapiAudioOutput::Initialize(int sample_rate, int channels, int bits) {
     if (FAILED(hr)) { LOG_ERROR("GetMixFormat: 0x%08lX", hr); device->Release(); client_->Release(); client_ = nullptr; free(ring_); ring_ = nullptr; return false; }
 
     exclusive_ = false;
+
+    // First, try exclusive mode at the input sample rate (avoid resampling)
+    WAVEFORMATEX exclusive_fmt = {};
+    exclusive_fmt.wFormatTag = WAVE_FORMAT_PCM;
+    exclusive_fmt.nChannels = mix->nChannels;
+    exclusive_fmt.nSamplesPerSec = in_rate_;
+    exclusive_fmt.wBitsPerSample = 16;
+    exclusive_fmt.nBlockAlign = exclusive_fmt.nChannels * exclusive_fmt.wBitsPerSample / 8;
+    exclusive_fmt.nAvgBytesPerSec = exclusive_fmt.nSamplesPerSec * exclusive_fmt.nBlockAlign;
+
     hr = client_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-        (REFERENCE_TIME)200000, (REFERENCE_TIME)0, mix, nullptr);
+        (REFERENCE_TIME)200000, (REFERENCE_TIME)0, &exclusive_fmt, nullptr);
     if (SUCCEEDED(hr)) {
         exclusive_ = true;
-        WAVEFORMATEX* actual = nullptr;
-        client_->GetMixFormat(&actual);
-        if (actual) {
-            out_rate_ = actual->nSamplesPerSec;
-            out_channels_ = actual->nChannels;
-            out_bits_ = actual->wBitsPerSample;
-            out_frame_bytes_ = actual->nBlockAlign;
-            bytes_per_sec_ = actual->nAvgBytesPerSec;
-            CoTaskMemFree(actual);
-        } else {
-            out_rate_ = mix->nSamplesPerSec;
-            out_channels_ = mix->nChannels;
-            out_bits_ = 16;
-            out_frame_bytes_ = mix->nChannels * 2;
-            bytes_per_sec_ = mix->nSamplesPerSec * mix->nChannels * 2;
-        }
-        CoTaskMemFree(mix);
-        LOG_INFO("WASAPI: EXCLUSIVE mode %d Hz, %d ch, %d bit", out_rate_, out_channels_, out_bits_);
-    } else {
-        LOG_WARN("WASAPI exclusive failed: 0x%08lX, falling back to shared", hr);
-        client_->Release();
-        client_ = nullptr;
-        hr = device->Activate(IID_IAudioClient_LOCAL, CLSCTX_ALL, nullptr, (void**)&client_);
-        if (FAILED(hr)) { LOG_ERROR("Re-Activate: 0x%08lX", hr); CoTaskMemFree(mix); device->Release(); free(ring_); ring_ = nullptr; return false; }
-
-        out_rate_ = mix->nSamplesPerSec;
+        out_rate_ = in_rate_;
         out_channels_ = mix->nChannels;
-        out_bits_ = mix->wBitsPerSample;
-        out_frame_bytes_ = mix->nBlockAlign;
-        bytes_per_sec_ = mix->nAvgBytesPerSec;
-
-        hr = client_->Initialize(AUDCLNT_SHAREMODE_SHARED,
+        out_bits_ = 16;
+        out_frame_bytes_ = mix->nChannels * 2;
+        bytes_per_sec_ = in_rate_ * mix->nChannels * 2;
+        CoTaskMemFree(mix);
+        LOG_INFO("WASAPI: EXCLUSIVE mode %d Hz, %d ch, %d bit (matches input)", out_rate_, out_channels_, out_bits_);
+    } else {
+        // Fall back to exclusive mode with mix format
+        hr = client_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,
             AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
             (REFERENCE_TIME)200000, (REFERENCE_TIME)0, mix, nullptr);
-        CoTaskMemFree(mix);
-        if (FAILED(hr)) { LOG_ERROR("IAudioClient_Initialize shared: 0x%08lX", hr); device->Release(); client_->Release(); client_ = nullptr; free(ring_); ring_ = nullptr; return false; }
-        LOG_INFO("WASAPI: SHARED mode %d Hz, %d ch, %d bit", out_rate_, out_channels_, out_bits_);
+        if (SUCCEEDED(hr)) {
+            exclusive_ = true;
+            WAVEFORMATEX* actual = nullptr;
+            client_->GetMixFormat(&actual);
+            if (actual) {
+                out_rate_ = actual->nSamplesPerSec;
+                out_channels_ = actual->nChannels;
+                out_bits_ = actual->wBitsPerSample;
+                out_frame_bytes_ = actual->nBlockAlign;
+                bytes_per_sec_ = actual->nAvgBytesPerSec;
+                CoTaskMemFree(actual);
+            } else {
+                out_rate_ = mix->nSamplesPerSec;
+                out_channels_ = mix->nChannels;
+                out_bits_ = 16;
+                out_frame_bytes_ = mix->nChannels * 2;
+                bytes_per_sec_ = mix->nSamplesPerSec * mix->nChannels * 2;
+            }
+            CoTaskMemFree(mix);
+            LOG_INFO("WASAPI: EXCLUSIVE mode %d Hz, %d ch, %d bit", out_rate_, out_channels_, out_bits_);
+        } else {
+            LOG_WARN("WASAPI exclusive failed: 0x%08lX, falling back to shared", hr);
+            client_->Release();
+            client_ = nullptr;
+            hr = device->Activate(IID_IAudioClient_LOCAL, CLSCTX_ALL, nullptr, (void**)&client_);
+            if (FAILED(hr)) { LOG_ERROR("Re-Activate: 0x%08lX", hr); CoTaskMemFree(mix); device->Release(); free(ring_); ring_ = nullptr; return false; }
+
+            out_rate_ = mix->nSamplesPerSec;
+            out_channels_ = mix->nChannels;
+            out_bits_ = mix->wBitsPerSample;
+            out_frame_bytes_ = mix->nBlockAlign;
+            bytes_per_sec_ = mix->nAvgBytesPerSec;
+
+            hr = client_->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                (REFERENCE_TIME)200000, (REFERENCE_TIME)0, mix, nullptr);
+            CoTaskMemFree(mix);
+            if (FAILED(hr)) { LOG_ERROR("IAudioClient_Initialize shared: 0x%08lX", hr); device->Release(); client_->Release(); client_ = nullptr; free(ring_); ring_ = nullptr; return false; }
+            LOG_INFO("WASAPI: SHARED mode %d Hz, %d ch, %d bit", out_rate_, out_channels_, out_bits_);
+        }
     }
 
     device->Release();
@@ -591,31 +616,28 @@ bool WasapiAudioOutput::ReinitDevice() {
         return false;
     }
 
-    // Try exclusive mode first, fall back to shared
+    // Try exclusive mode at input rate first, then mix format, then shared
     exclusive_ = false;
+    WAVEFORMATEX exclusive_fmt = {};
+    exclusive_fmt.wFormatTag = WAVE_FORMAT_PCM;
+    exclusive_fmt.nChannels = mix->nChannels;
+    exclusive_fmt.nSamplesPerSec = in_rate_;
+    exclusive_fmt.wBitsPerSample = 16;
+    exclusive_fmt.nBlockAlign = exclusive_fmt.nChannels * exclusive_fmt.wBitsPerSample / 8;
+    exclusive_fmt.nAvgBytesPerSec = exclusive_fmt.nSamplesPerSec * exclusive_fmt.nBlockAlign;
+
     hr = client_->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-        (REFERENCE_TIME)200000, (REFERENCE_TIME)0, mix, nullptr);
+        (REFERENCE_TIME)200000, (REFERENCE_TIME)0, &exclusive_fmt, nullptr);
     if (SUCCEEDED(hr)) {
         exclusive_ = true;
-        WAVEFORMATEX* actual = nullptr;
-        client_->GetMixFormat(&actual);
-        if (actual) {
-            out_rate_ = actual->nSamplesPerSec;
-            out_channels_ = actual->nChannels;
-            out_bits_ = actual->wBitsPerSample;
-            out_frame_bytes_ = actual->nBlockAlign;
-            bytes_per_sec_ = actual->nAvgBytesPerSec;
-            CoTaskMemFree(actual);
-        } else {
-            out_rate_ = mix->nSamplesPerSec;
-            out_channels_ = mix->nChannels;
-            out_bits_ = 16;
-            out_frame_bytes_ = mix->nChannels * 2;
-            bytes_per_sec_ = mix->nSamplesPerSec * mix->nChannels * 2;
-        }
+        out_rate_ = in_rate_;
+        out_channels_ = mix->nChannels;
+        out_bits_ = 16;
+        out_frame_bytes_ = mix->nChannels * 2;
+        bytes_per_sec_ = in_rate_ * mix->nChannels * 2;
         CoTaskMemFree(mix);
-        LOG_INFO("WASAPI: switched to EXCLUSIVE %d Hz, %d ch", out_rate_, out_channels_);
+        LOG_INFO("WASAPI: switched to EXCLUSIVE %d Hz (matches input), %d ch", out_rate_, out_channels_);
     } else {
         client_->Release();
         client_ = nullptr;
