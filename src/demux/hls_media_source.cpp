@@ -2,19 +2,25 @@
 #include "../network/hls_stream.h"
 #include "../util/log.h"
 
+// MEReadSample event type - MediaEventType value for signaling data availability
+#ifndef MEReadSample
+#define MEReadSample ((MediaEventType)12)
+#endif
+
 HlsMediaSource::HlsMediaSource(HlsByteStream* byte_stream)
     : byte_stream_(byte_stream), ref_count_(1),
-      is_started_(false), is_shutdown_(false), read_thread_(nullptr), read_running_(false) {
+      is_started_(false), is_shutdown_(false),
+      event_queue_(nullptr), read_thread_(nullptr), read_running_(false) {
     InitializeCriticalSection(&lock_);
-    InitializeCriticalSection(&queue_lock_);
     if (byte_stream_) byte_stream_->AddRef();
+    MFCreateEventQueue(&event_queue_);
 }
 
 HlsMediaSource::~HlsMediaSource() {
     Shutdown();
     if (byte_stream_) byte_stream_->Release();
+    if (event_queue_) { event_queue_->Shutdown(); event_queue_->Release(); }
     DeleteCriticalSection(&lock_);
-    DeleteCriticalSection(&queue_lock_);
 }
 
 HRESULT HlsMediaSource::CreateInstance(HlsByteStream* byte_stream, IMFMediaSource** ppSource) {
@@ -114,36 +120,30 @@ STDMETHODIMP HlsMediaSource::Shutdown() {
     if (is_shutdown_) return S_OK;
     is_shutdown_ = true;
     Stop();
+    if (event_queue_) event_queue_->Shutdown();
     return S_OK;
 }
 
 // IMFMediaEventGenerator
 STDMETHODIMP HlsMediaSource::BeginGetEvent(IMFAsyncCallback* pCallback, IUnknown* pState) {
-    return E_NOTIMPL;
+    if (!event_queue_) return E_FAIL;
+    return event_queue_->BeginGetEvent(pCallback, pState);
 }
 
 STDMETHODIMP HlsMediaSource::EndGetEvent(IMFAsyncResult* pResult, IMFMediaEvent** ppEvent) {
-    return E_NOTIMPL;
+    if (!event_queue_) return E_FAIL;
+    return event_queue_->EndGetEvent(pResult, ppEvent);
 }
 
 STDMETHODIMP HlsMediaSource::GetEvent(DWORD dwFlags, IMFMediaEvent** ppEvent) {
-    return E_NOTIMPL;
+    if (!event_queue_) return E_FAIL;
+    return event_queue_->GetEvent(dwFlags, ppEvent);
 }
 
 STDMETHODIMP HlsMediaSource::QueueEvent(MediaEventType met, REFGUID guidExtendedType,
                                          HRESULT hrStatus, const PROPVARIANT* pvValue) {
-    return S_OK;
-}
-
-// Sample delivery
-void HlsMediaSource::DeliverVideoSample(const uint8_t* data, int size, double pts) {
-    // TODO: Create IMFMediaSample and queue it
-    LOG_DEBUG("HlsMediaSource: video sample %d bytes, pts=%.3f", size, pts);
-}
-
-void HlsMediaSource::DeliverAudioSample(const uint8_t* data, int size, double pts) {
-    // TODO: Create IMFMediaSample and queue it
-    LOG_DEBUG("HlsMediaSource: audio sample %d bytes, pts=%.3f", size, pts);
+    if (!event_queue_) return E_FAIL;
+    return event_queue_->QueueEventParamVar(met, guidExtendedType, hrStatus, pvValue);
 }
 
 // Read thread
@@ -157,10 +157,9 @@ void HlsMediaSource::ReadLoop() {
         DemuxFrame frame;
         if (demuxer_.ReadAndDemux(byte_stream_)) {
             while (demuxer_.GetNextFrame(frame)) {
-                if (frame.type == DemuxFrame::Video) {
-                    DeliverVideoSample(frame.data.data(), (int)frame.data.size(), frame.pts);
-                } else if (frame.type == DemuxFrame::Audio) {
-                    DeliverAudioSample(frame.data.data(), (int)frame.data.size(), frame.pts);
+                // Queue event to notify MF that data is available
+                if (event_queue_) {
+                    event_queue_->QueueEventParamVar(MEReadSample, GUID_NULL, S_OK, nullptr);
                 }
             }
         }
