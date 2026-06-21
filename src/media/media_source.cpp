@@ -74,6 +74,14 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback, bo
                 hr = MFCreateSourceReaderFromMediaSource(
                     hls_source.get(), sattrs.get(), &reader);
                 LOG_INFO("MFCreateSourceReaderFromMediaSource returned: 0x%08lX", hr);
+                if (FAILED(hr)) {
+                    LOG_ERROR("MFCreateSourceReaderFromMediaSource failed: 0x%08lX", hr);
+                    // Fall back to ByteStream approach
+                    LOG_INFO("Falling back to MFCreateSourceReaderFromByteStream...");
+                    hr = MFCreateSourceReaderFromByteStream(
+                        hls_->GetByteStream(), sattrs.get(), &reader);
+                    LOG_INFO("MFCreateSourceReaderFromByteStream returned: 0x%08lX", hr);
+                }
                 sattrs.reset();
                 if (FAILED(hr)) {
                     LOG_ERROR("MFCreateSourceReaderFromMediaSource failed: 0x%08lX", hr);
