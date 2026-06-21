@@ -27,8 +27,10 @@ public:
     void Reset();
 
     // Read and parse TS data from byte stream
-    // Returns true if data was processed, false on error or no data
     bool ReadAndDemux(HlsByteStream* bs);
+
+    // Feed raw TS bytes directly (for TsByteStream integration)
+    bool FeedData(const uint8_t* data, int size);
 
     // Get next demuxed frame
     bool GetNextFrame(DemuxFrame& frame);

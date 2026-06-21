@@ -72,6 +72,10 @@ private:
     int output_pos_;
     int output_size_;
 
+    // Async result for EndRead
+    std::atomic<ULONG> async_result_{0};
+    std::atomic<HRESULT> async_hr_{E_ABORT};
+
     // Stream info (populated after first parse)
     bool has_video_;
     bool has_audio_;

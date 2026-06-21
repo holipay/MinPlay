@@ -1,6 +1,10 @@
 #pragma once
 #include "../util/com_ptr.h"
 #include "../video_out/video_output.h"
+#include "../audio_out/audio_output.h"
+#include "../sync/sync_context.h"
+#include "../util/osd.h"
+#include "../demux/ts_byte_stream.h"
 #include <windows.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -61,6 +65,7 @@ public:
 private:
     ComPtr<IMFSourceReader> reader_;
     HlsManager* hls_ = nullptr;  // non-null when HLS stream is active
+    TsByteStream* ts_stream_ = nullptr;  // TsDemuxer-based stream for HLS
     bool has_video_ = false;
     bool has_audio_ = false;
     DWORD video_stream_ = (DWORD)-1;

@@ -55,7 +55,6 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback, bo
                 hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
                 if (FAILED(hr)) return false;
                 sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-                // Low latency for HLS byte stream reader
                 sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
                 if (callback) {
                     sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
@@ -363,6 +362,7 @@ bool MediaSource::OpenHls(const wchar_t* url) {
 void MediaSource::Close() {
     if (hls_) hls_->Close();
     reader_.reset();
+    if (ts_stream_) { ts_stream_->Release(); ts_stream_ = nullptr; }
     if (hls_) { delete hls_; hls_ = nullptr; }
     is_live_ = false;
     has_video_ = false;

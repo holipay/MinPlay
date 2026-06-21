@@ -79,25 +79,12 @@ STDMETHODIMP TsByteStream::IsEndOfStream(BOOL* pfEndOfStream) {
 }
 
 bool TsByteStream::RefillBuffer() {
-    // Get frames from TsDemuxer (which maintains its own state)
-    DemuxFrame frame;
-    if (demuxer_.GetNextFrame(frame)) {
-        output_buffer_ = std::move(frame.data);
-        output_pos_ = 0;
-        output_size_ = (int)output_buffer_.size();
+    // Key design: pass through raw TS data from HlsByteStream.
+    // MF's source reader expects TS data format.
+    // The TsDemuxer is used to monitor stream state (program info),
+    // not to replace the data format.
+    // The critical fix: never return 0 bytes, preventing MF's EOF.
 
-        if (!has_video_ && frame.type == DemuxFrame::Video && frame.data.size() > 0) {
-            has_video_ = true;
-            LOG_INFO("TsByteStream: video stream detected (%zu bytes)", frame.data.size());
-        }
-        if (!has_audio_ && frame.type == DemuxFrame::Audio && frame.data.size() > 0) {
-            has_audio_ = true;
-            LOG_INFO("TsByteStream: audio stream detected (%zu bytes)", frame.data.size());
-        }
-        return true;
-    }
-
-    // No frames — read more TS data from HlsByteStream and feed to demuxer
     if (!hls_stream_) return false;
 
     const int TS_READ_SIZE = 256 * 1024;
@@ -106,31 +93,134 @@ bool TsByteStream::RefillBuffer() {
     HRESULT hr = hls_stream_->Read(ts_data.data(), TS_READ_SIZE, &ts_bytes_read);
 
     if (FAILED(hr) || ts_bytes_read == 0) {
-        return false;  // No data available yet — caller should retry
+        return false;  // No data yet
     }
 
-    // Feed TS data to demuxer (it maintains state internally)
-    // TsDemuxer::ReadAndDemux reads from a byte stream, but we have raw bytes.
-    // Instead, parse the TS packets directly.
-    TsPacketParser parser;
-    int pos = parser.FindSyncByte(ts_data.data(), (int)ts_bytes_read, 0);
-    if (pos < 0) return false;
+    // Feed to demuxer for stream info (video/audio PID detection)
+    demuxer_.FeedData(ts_data.data(), (int)ts_bytes_read);
 
-    while (pos + TS_PACKET_SIZE <= (int)ts_bytes_read) {
-        TsPacket packet;
-        if (parser.ParsePacket(ts_data.data() + pos, (int)ts_bytes_read - pos, packet)) {
-            // Feed to demuxer's internal assemblers (video/audio PID)
-            // This is simplified — in production, would use demuxer's full pipeline
-        }
-        pos += TS_PACKET_SIZE;
-        // Re-align to next sync byte
-        if (pos + TS_PACKET_SIZE <= (int)ts_bytes_read) {
-            int next_sync = parser.FindSyncByte(ts_data.data(), (int)ts_bytes_read, pos);
-            if (next_sync > pos) pos = next_sync;
-            else if (next_sync < 0) break;
+    // Update stream info
+    if (!has_video_ && demuxer_.HasVideo()) {
+        has_video_ = true;
+        LOG_INFO("TsByteStream: video stream detected");
+    }
+    if (!has_audio_ && demuxer_.HasAudio()) {
+        has_audio_ = true;
+        LOG_INFO("TsByteStream: audio stream detected");
+    }
+
+    // Return the raw TS data to MF (not parsed ES data)
+    EnterCriticalSection(&lock_);
+    output_buffer_ = std::move(ts_data);
+    output_size_ = (int)ts_bytes_read;
+    output_pos_ = 0;
+    LeaveCriticalSection(&lock_);
+
+    return true;
+}
+
+STDMETHODIMP TsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
+    if (!pb) return E_POINTER;
+
+    EnterCriticalSection(&lock_);
+    if (closed_) { LeaveCriticalSection(&lock_); return E_ABORT; }
+
+    // Try output buffer first
+    if (output_pos_ < output_size_) {
+        int avail = output_size_ - output_pos_;
+        int to_read = (int)cb < avail ? (int)cb : avail;
+        memcpy(pb, output_buffer_.data() + output_pos_, to_read);
+        output_pos_ += to_read;
+        if (pcbRead) *pcbRead = to_read;
+        LeaveCriticalSection(&lock_);
+        return S_OK;
+    }
+    LeaveCriticalSection(&lock_);
+
+    // Refill from demuxer
+    if (RefillBuffer()) {
+        EnterCriticalSection(&lock_);
+        int avail = output_size_ - output_pos_;
+        int to_read = (int)cb < avail ? (int)cb : avail;
+        memcpy(pb, output_buffer_.data() + output_pos_, to_read);
+        output_pos_ += to_read;
+        if (pcbRead) *pcbRead = to_read;
+        LeaveCriticalSection(&lock_);
+        return S_OK;
+    }
+
+    if (pcbRead) *pcbRead = 0;
+    return S_OK;
+}
+
+STDMETHODIMP TsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCallback, IUnknown* pState) {
+    if (!pb || !pCallback) return E_POINTER;
+
+    // Try to fill the buffer
+    if (!RefillBuffer() && hls_stream_) {
+        // Wait for data (up to 60s)
+        for (int i = 0; i < 300 && !output_buffer_.empty() == false; i++) {
+            Sleep(200);
+            if (RefillBuffer()) break;
         }
     }
 
-    // For now, return false — full integration needs proper ES data buffering
-    return false;
+    EnterCriticalSection(&lock_);
+    int avail = output_size_ - output_pos_;
+    int to_read = avail > 0 ? ((int)cb < avail ? (int)cb : avail) : 0;
+
+    if (to_read > 0) {
+        memcpy(pb, output_buffer_.data() + output_pos_, to_read);
+        output_pos_ += to_read;
+    }
+
+    async_result_.store(to_read, std::memory_order_release);
+    async_hr_.store(S_OK, std::memory_order_release);
+    LeaveCriticalSection(&lock_);
+
+    ComPtr<IMFAsyncResult> result;
+    if (SUCCEEDED(MFCreateAsyncResult(nullptr, pCallback, pState, &result))) {
+        return MFInvokeCallback(result.get());
+    }
+    return S_OK;
+}
+
+STDMETHODIMP TsByteStream::EndRead(IMFAsyncResult* /*pResult*/, ULONG* pcbRead) {
+    if (pcbRead) *pcbRead = async_result_.load(std::memory_order_acquire);
+    return async_hr_.load(std::memory_order_acquire);
+}
+
+STDMETHODIMP TsByteStream::Write(const BYTE*, ULONG, ULONG*) { return E_NOTIMPL; }
+STDMETHODIMP TsByteStream::BeginWrite(const BYTE*, ULONG, IMFAsyncCallback*, IUnknown*) { return E_NOTIMPL; }
+STDMETHODIMP TsByteStream::EndWrite(IMFAsyncResult*, ULONG*) { return E_NOTIMPL; }
+
+STDMETHODIMP TsByteStream::Seek(MFBYTESTREAM_SEEK_ORIGIN SeekOrigin, LONGLONG llSeekOffset,
+                                  DWORD /*dwSeekFlags*/, QWORD* pqwCurrentPosition) {
+    EnterCriticalSection(&lock_);
+    if (SeekOrigin == 0) {
+        output_pos_ = (int)llSeekOffset;
+    } else {
+        output_pos_ += (int)llSeekOffset;
+    }
+    if (output_pos_ < 0) output_pos_ = 0;
+    if (pqwCurrentPosition) *pqwCurrentPosition = output_pos_;
+    LeaveCriticalSection(&lock_);
+    return S_OK;
+}
+
+STDMETHODIMP TsByteStream::Flush() { return S_OK; }
+
+STDMETHODIMP TsByteStream::Close() {
+    EnterCriticalSection(&lock_);
+    closed_ = true;
+    LeaveCriticalSection(&lock_);
+    if (data_event_) SetEvent(data_event_);
+    return S_OK;
+}
+
+void TsByteStream::Abort() {
+    EnterCriticalSection(&lock_);
+    closed_ = true;
+    LeaveCriticalSection(&lock_);
+    if (data_event_) SetEvent(data_event_);
 }

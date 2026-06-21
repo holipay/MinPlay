@@ -27,33 +27,36 @@ void TsDemuxer::Reset() {
 bool TsDemuxer::ReadAndDemux(HlsByteStream* bs) {
     if (!bs || eos_) return false;
 
-    // Read a chunk of data from the byte stream
-    const int READ_SIZE = 256 * 1024;  // 256KB chunks
+    const int READ_SIZE = 256 * 1024;
     read_buffer_.resize(READ_SIZE);
 
     ULONG bytes_read = 0;
     HRESULT hr = bs->Read(read_buffer_.data(), (ULONG)read_buffer_.size(), &bytes_read);
 
     if (FAILED(hr) || bytes_read == 0) {
-        // No data available - this is normal for live streams
-        // The caller should wait and try again
         return false;
     }
 
-    const uint8_t* data = read_buffer_.data();
-    int data_size = (int)bytes_read;
+    return FeedData(read_buffer_.data(), (int)bytes_read);
+}
+
+bool TsDemuxer::FeedData(const uint8_t* data, int size) {
+    if (!data || size <= 0 || eos_) return false;
+
+    const uint8_t* raw = data;
+    int raw_size = size;
 
     // Find first sync byte
-    int pos = parser_.FindSyncByte(data, data_size, 0);
+    int pos = parser_.FindSyncByte(raw, raw_size, 0);
     if (pos < 0) {
-        LOG_WARN("TsDemuxer: no sync byte found in %d bytes", data_size);
+        LOG_WARN("TsDemuxer: no sync byte found in %d bytes", raw_size);
         return false;
     }
 
     // Process complete TS packets
-    while (pos + TS_PACKET_SIZE <= data_size) {
+    while (pos + TS_PACKET_SIZE <= raw_size) {
         TsPacket packet;
-        if (parser_.ParsePacket(data + pos, data_size - pos, packet)) {
+        if (parser_.ParsePacket(raw + pos, raw_size - pos, packet)) {
             // Process PAT/PMT
             if (!program_ready_) {
                 if (program_manager_.ProcessPacket(packet.payload, packet.payload_size,
@@ -68,17 +71,6 @@ bool TsDemuxer::ReadAndDemux(HlsByteStream* bs) {
                 }
             }
 
-            // Check continuity counter (optional - for debugging)
-            auto it = continuity_counters_.find(packet.pid);
-            if (it != continuity_counters_.end()) {
-                uint8_t expected = (it->second + 1) & 0x0F;
-                if (expected != packet.continuity_counter) {
-                    LOG_DEBUG("TsDemuxer: PID %u continuity error (expected %u, got %u)",
-                              packet.pid, expected, packet.continuity_counter);
-                }
-            }
-            continuity_counters_[packet.pid] = packet.continuity_counter;
-
             // Feed to PES assembler
             if (packet.pid == video_pid_ && video_pid_ > 0) {
                 video_assembler_.FeedPayload(packet.payload, packet.payload_size,
@@ -92,12 +84,12 @@ bool TsDemuxer::ReadAndDemux(HlsByteStream* bs) {
         pos += TS_PACKET_SIZE;
 
         // Re-align to next sync byte
-        if (pos + TS_PACKET_SIZE <= data_size) {
-            int next_sync = parser_.FindSyncByte(data, data_size, pos);
+        if (pos + TS_PACKET_SIZE <= raw_size) {
+            int next_sync = parser_.FindSyncByte(raw, raw_size, pos);
             if (next_sync > pos) {
                 pos = next_sync;
             } else if (next_sync < 0) {
-                break;  // No more sync bytes
+                break;
             }
         }
     }
