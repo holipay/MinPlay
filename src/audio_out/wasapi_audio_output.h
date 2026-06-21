@@ -105,6 +105,7 @@ private:
     void RingWrite(const uint8_t* data, int size);
     float ReadSample(const uint8_t* p, int bits) const;
     void FillBuffer(BYTE* out, int out_frames);
+    void AnalyzeWaveform(const float* samples, int count);  // Diagnostic: log waveform stats
     bool ReinitDevice();  // Reinitialize WASAPI with current default device
 
     std::atomic<ULONG> ref_count_{1};  // For IMMNotificationClient

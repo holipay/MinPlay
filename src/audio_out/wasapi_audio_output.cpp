@@ -220,11 +220,59 @@ DWORD WasapiAudioOutput::PlaybackThreadProc() {
         if (FAILED(hr) || !buf) continue;
 
         FillBuffer(buf, frames);
+        AnalyzeWaveform((const float*)buf, frames * out_channels_);
         render_->ReleaseBuffer(frames, 0);
     }
 
     CoUninitialize();
     return 0;
+}
+
+// Diagnostic: analyze waveform for noise detection
+// Logs RMS level, peak amplitude, and DC offset every ~5 seconds
+void WasapiAudioOutput::AnalyzeWaveform(const float* samples, int count) {
+    static int frame_count = 0;
+    static double sum_sq = 0;
+    static float peak = 0;
+    static double sum = 0;
+    static int total = 0;
+
+    frame_count++;
+    for (int i = 0; i < count; i++) {
+        float s = samples[i];
+        sum_sq += (double)s * s;
+        sum += s;
+        total++;
+        float abs_s = s < 0 ? -s : s;
+        if (abs_s > peak) peak = abs_s;
+    }
+
+    // Log every ~5 seconds (assuming 48kHz, ~2400 frames per 50ms callback)
+    if (frame_count >= 100) {
+        double rms = sqrt(sum_sq / total);
+        double dc_offset = sum / total;
+
+        // Noise detection: high RMS with near-zero DC offset suggests white noise
+        // Normal audio has RMS typically 0.01-0.3, DC offset near 0
+        // White noise from format mismatch has RMS ~0.5-1.0
+        const char* noise_status = "OK";
+        if (rms > 0.4 && peak > 0.8) {
+            noise_status = "POSSIBLE_WHITE_NOISE";
+        } else if (rms < 0.001 && peak < 0.01) {
+            noise_status = "SILENCE";
+        } else if (abs(dc_offset) > 0.1) {
+            noise_status = "DC_OFFSET";
+        }
+
+        LOG_INFO("Audio waveform: RMS=%.4f peak=%.4f DC=%.4f status=%s (fmt=%d bit, %d Hz, %d ch)",
+                 rms, peak, dc_offset, noise_status, in_bits_, in_rate_, in_channels_);
+
+        frame_count = 0;
+        sum_sq = 0;
+        peak = 0;
+        sum = 0;
+        total = 0;
+    }
 }
 
 DWORD WINAPI WasapiAudioOutput::PlaybackThread(LPVOID arg) {
