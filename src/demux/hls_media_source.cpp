@@ -98,36 +98,31 @@ STDMETHODIMP HlsMediaSource::CreatePresentationDescriptor(IMFPresentationDescrip
     // Try to detect streams from byte data, but don't block if no data yet.
     // If no data available, assume H.264+AAC (most common for HLS).
     if (!demuxer_.HasVideo() && !demuxer_.HasAudio() && byte_stream_) {
-        QWORD len = 0;
-        byte_stream_->GetLength(&len);
-        if (len > 0) {
-            const int SCAN_SIZE = 256 * 1024;
-            std::vector<uint8_t> scan_buf(SCAN_SIZE);
-            ULONG bytes_read = 0;
-            byte_stream_->Seek(MFBYTESTREAM_SEEK_ORIGIN(0), 0, 0, nullptr);
-            HRESULT hr = byte_stream_->Read(scan_buf.data(), SCAN_SIZE, &bytes_read);
-            if (SUCCEEDED(hr) && bytes_read > 0) {
-                demuxer_.FeedData(scan_buf.data(), (int)bytes_read);
-            }
-            byte_stream_->Seek(MFBYTESTREAM_SEEK_ORIGIN(0), 0, 0, nullptr);
+        const int SCAN_SIZE = 256 * 1024;
+        std::vector<uint8_t> scan_buf(SCAN_SIZE);
+        ULONG bytes_read = 0;
+        byte_stream_->Seek(MFBYTESTREAM_SEEK_ORIGIN(0), 0, 0, nullptr);
+        HRESULT hr = byte_stream_->Read(scan_buf.data(), SCAN_SIZE, &bytes_read);
+        if (SUCCEEDED(hr) && bytes_read > 0) {
+            demuxer_.FeedData(scan_buf.data(), (int)bytes_read);
         }
-        // If still no streams detected, assume H.264+AAC defaults
+        byte_stream_->Seek(MFBYTESTREAM_SEEK_ORIGIN(0), 0, 0, nullptr);
         if (!demuxer_.HasVideo() && !demuxer_.HasAudio()) {
-            LOG_INFO("HlsMediaSource: no stream data yet, assuming H.264+AAC defaults");
+            LOG_INFO("HlsMediaSource: no stream data detected, assuming H.264+AAC defaults");
         }
     }
 
     std::vector<IMFStreamDescriptor*> descs;
     ComPtr<IMFMediaType> vmt, amt;
 
-    // Create video stream descriptor (detected or default H.264)
-    if (demuxer_.HasVideo() || !demuxer_.HasAudio()) {
+    // Create video stream descriptor
+    // Use default H.264 format — MF source reader will negotiate actual resolution
+    {
         HRESULT hr = MFCreateMediaType(&vmt);
         if (FAILED(hr)) return hr;
         vmt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
         vmt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-        MFSetAttributeSize(vmt.get(), MF_MT_FRAME_SIZE, 1920, 1080);
-        MFSetAttributeRatio(vmt.get(), MF_MT_FRAME_RATE, 30, 1);
+        // Don't set specific resolution — let MF negotiate from actual data
         vmt->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
         vmt->SetUINT32(MF_MT_AVG_BITRATE, 5000000);
 
@@ -138,7 +133,7 @@ STDMETHODIMP HlsMediaSource::CreatePresentationDescriptor(IMFPresentationDescrip
         if (SUCCEEDED(hr2)) descs.push_back(video_sd.Detach());
     }
 
-    // Create audio stream descriptor (detected or default AAC)
+    // Create audio stream descriptor
     {
         HRESULT hr = MFCreateMediaType(&amt);
         if (FAILED(hr)) return hr;
@@ -283,12 +278,22 @@ DWORD WINAPI HlsMediaSource::ReadThreadProc(LPVOID param) {
 
 void HlsMediaSource::ReadLoop() {
     while (read_running_) {
+        // Wait for streams to have pending requests before delivering frames.
+        // The source reader calls RequestSample after Start(), so we need to
+        // wait for this before delivering any data.
+        bool video_ready = !video_stream_ || video_stream_->HasPendingRequest();
+        bool audio_ready = !audio_stream_ || audio_stream_->HasPendingRequest();
+        if (!video_ready && !audio_ready) {
+            Sleep(5);
+            continue;
+        }
+
         DemuxFrame frame;
         if (demuxer_.ReadAndDemux(byte_stream_)) {
             while (demuxer_.GetNextFrame(frame)) {
-                if (frame.type == DemuxFrame::Video && video_stream_) {
+                if (frame.type == DemuxFrame::Video && video_stream_ && video_stream_->HasPendingRequest()) {
                     video_stream_->DeliverFrame(frame.data.data(), frame.data.size(), frame.pts);
-                } else if (frame.type == DemuxFrame::Audio && audio_stream_) {
+                } else if (frame.type == DemuxFrame::Audio && audio_stream_ && audio_stream_->HasPendingRequest()) {
                     audio_stream_->DeliverFrame(frame.data.data(), frame.data.size(), frame.pts);
                 }
             }
