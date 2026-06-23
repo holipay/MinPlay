@@ -3,6 +3,11 @@
 #include "../network/hls_stream.h"
 #include "../util/log.h"
 
+// MEStarted not defined in SDK 10.0.28000 — value is 1 per MF spec
+#ifndef MEStarted
+#define MEStarted ((MediaEventType)1)
+#endif
+
 HlsMediaSource::HlsMediaSource(HlsByteStream* byte_stream)
     : byte_stream_(byte_stream), ref_count_(1),
       is_started_(false), is_shutdown_(false),
@@ -49,6 +54,11 @@ STDMETHODIMP HlsMediaSource::QueryInterface(REFIID riid, void** ppv) {
         AddRef();
         return S_OK;
     }
+    if (riid == IID_IMFMediaEventGenerator) {
+        *ppv = static_cast<IMFMediaEventGenerator*>(this);
+        AddRef();
+        return S_OK;
+    }
     if (riid == IID_IMFGetService) {
         *ppv = static_cast<IMFGetService*>(this);
         AddRef();
@@ -85,33 +95,37 @@ STDMETHODIMP HlsMediaSource::CreatePresentationDescriptor(IMFPresentationDescrip
     if (!ppPD) return E_POINTER;
     *ppPD = nullptr;
 
-    // Pre-scan byte stream to detect actual stream types from PAT/PMT
-    // Read first 256KB and feed to demuxer to parse TS headers
+    // Try to detect streams from byte data, but don't block if no data yet.
+    // If no data available, assume H.264+AAC (most common for HLS).
     if (!demuxer_.HasVideo() && !demuxer_.HasAudio() && byte_stream_) {
-        const int SCAN_SIZE = 256 * 1024;
-        std::vector<uint8_t> scan_buf(SCAN_SIZE);
-        ULONG bytes_read = 0;
-        byte_stream_->Seek(MFBYTESTREAM_SEEK_ORIGIN(0), 0, 0, nullptr);
-        HRESULT hr = byte_stream_->Read(scan_buf.data(), SCAN_SIZE, &bytes_read);
-        if (SUCCEEDED(hr) && bytes_read > 0) {
-            demuxer_.FeedData(scan_buf.data(), (int)bytes_read);
+        QWORD len = 0;
+        byte_stream_->GetLength(&len);
+        if (len > 0) {
+            const int SCAN_SIZE = 256 * 1024;
+            std::vector<uint8_t> scan_buf(SCAN_SIZE);
+            ULONG bytes_read = 0;
+            byte_stream_->Seek(MFBYTESTREAM_SEEK_ORIGIN(0), 0, 0, nullptr);
+            HRESULT hr = byte_stream_->Read(scan_buf.data(), SCAN_SIZE, &bytes_read);
+            if (SUCCEEDED(hr) && bytes_read > 0) {
+                demuxer_.FeedData(scan_buf.data(), (int)bytes_read);
+            }
+            byte_stream_->Seek(MFBYTESTREAM_SEEK_ORIGIN(0), 0, 0, nullptr);
         }
-        byte_stream_->Seek(MFBYTESTREAM_SEEK_ORIGIN(0), 0, 0, nullptr);
+        // If still no streams detected, assume H.264+AAC defaults
+        if (!demuxer_.HasVideo() && !demuxer_.HasAudio()) {
+            LOG_INFO("HlsMediaSource: no stream data yet, assuming H.264+AAC defaults");
+        }
     }
 
     std::vector<IMFStreamDescriptor*> descs;
     ComPtr<IMFMediaType> vmt, amt;
 
-    // Create video stream descriptor if video detected
-    if (demuxer_.HasVideo()) {
+    // Create video stream descriptor (detected or default H.264)
+    if (demuxer_.HasVideo() || !demuxer_.HasAudio()) {
         HRESULT hr = MFCreateMediaType(&vmt);
         if (FAILED(hr)) return hr;
         vmt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        if (demuxer_.GetVideoStreamType() == StreamType::H264) {
-            vmt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-        } else {
-            vmt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-        }
+        vmt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
         MFSetAttributeSize(vmt.get(), MF_MT_FRAME_SIZE, 1920, 1080);
         MFSetAttributeRatio(vmt.get(), MF_MT_FRAME_RATE, 30, 1);
         vmt->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
@@ -124,26 +138,16 @@ STDMETHODIMP HlsMediaSource::CreatePresentationDescriptor(IMFPresentationDescrip
         if (SUCCEEDED(hr2)) descs.push_back(video_sd.Detach());
     }
 
-    // Create audio stream descriptor if audio detected
-    if (demuxer_.HasAudio()) {
+    // Create audio stream descriptor (detected or default AAC)
+    {
         HRESULT hr = MFCreateMediaType(&amt);
         if (FAILED(hr)) return hr;
         amt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        StreamType at = demuxer_.GetAudioStreamType();
-        if (at == StreamType::AAC || at == StreamType::AAC_LATM) {
-            amt->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
-            amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-            amt->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
-            amt->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
-            amt->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000 / 8);
-        } else if (at == StreamType::MP3) {
-            amt->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_MP3);
-            amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-            amt->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
-            amt->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
-        } else {
-            return E_FAIL;
-        }
+        amt->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
+        amt->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+        amt->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
+        amt->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+        amt->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192000 / 8);
 
         ComPtr<IMFStreamDescriptor> audio_sd;
         IMFMediaType* raw_mt = amt.get();
@@ -185,9 +189,19 @@ STDMETHODIMP HlsMediaSource::Start(IMFPresentationDescriptor* pPD, const GUID* p
     if (is_started_) return E_FAIL;
     is_started_ = true;
 
+    // MF requires MEStreamStarted on each stream before samples can be delivered
+    if (video_stream_) video_stream_->QueueEvent(MEStreamStarted, GUID_NULL, S_OK, nullptr);
+    if (audio_stream_) audio_stream_->QueueEvent(MEStreamStarted, GUID_NULL, S_OK, nullptr);
+
     // Start read thread
     read_running_ = true;
     read_thread_ = CreateThread(nullptr, 0, ReadThreadProc, this, 0, nullptr);
+
+    // MF requires MEStarted event after Start()
+    if (event_queue_) {
+        event_queue_->QueueEventParamVar(MEStarted, GUID_NULL, S_OK, nullptr);
+    }
+
     return S_OK;
 }
 

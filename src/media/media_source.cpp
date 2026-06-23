@@ -51,23 +51,59 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback, bo
             reader.reset();
             LOG_INFO("About to call OpenHls...");
             if (OpenHls(url)) {
-                LOG_INFO("OpenHls succeeded, creating source reader from byte stream...");
+                LOG_INFO("OpenHls succeeded, creating HlsMediaSource...");
 
-                // Create source reader attributes
-                hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
-                if (FAILED(hr)) return false;
-                sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-                sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
-                if (callback) {
-                    sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
+                // Create custom IMFMediaSource with our own TS demuxer
+                // (avoids MF's immutable EOF flag issue in msdatmpg.dll)
+                ComPtr<IMFMediaSource> hls_source;
+                hr = HlsMediaSource::CreateInstance(hls_->GetByteStream(), &hls_source);
+                if (SUCCEEDED(hr)) {
+                    LOG_INFO("HlsMediaSource created successfully");
+
+                    hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
+                    if (FAILED(hr)) return false;
+                    sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+                    sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
+                    if (callback) {
+                        sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
+                    }
+                    LOG_INFO("Calling MFCreateSourceReaderFromMediaSource...");
+                    hr = MFCreateSourceReaderFromMediaSource(
+                        hls_source.get(), sattrs.get(), &reader);
+                    LOG_INFO("MFCreateSourceReaderFromMediaSource returned: 0x%08lX", hr);
+                    sattrs.reset();
+
+                    if (FAILED(hr)) {
+                        LOG_WARN("MFCreateSourceReaderFromMediaSource failed, falling back to ByteStream");
+                        hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
+                        if (FAILED(hr)) return false;
+                        sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+                        sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
+                        if (callback) {
+                            sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
+                        }
+                        hr = MFCreateSourceReaderFromByteStream(
+                            hls_->GetByteStream(), sattrs.get(), &reader);
+                        LOG_INFO("MFCreateSourceReaderFromByteStream returned: 0x%08lX", hr);
+                        sattrs.reset();
+                    }
+                } else {
+                    LOG_WARN("HlsMediaSource::CreateInstance failed, falling back to ByteStream");
+                    hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
+                    if (FAILED(hr)) return false;
+                    sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+                    sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
+                    if (callback) {
+                        sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
+                    }
+                    hr = MFCreateSourceReaderFromByteStream(
+                        hls_->GetByteStream(), sattrs.get(), &reader);
+                    LOG_INFO("MFCreateSourceReaderFromByteStream returned: 0x%08lX", hr);
+                    sattrs.reset();
                 }
-                LOG_INFO("Calling MFCreateSourceReaderFromByteStream...");
-                hr = MFCreateSourceReaderFromByteStream(
-                    hls_->GetByteStream(), sattrs.get(), &reader);
-                LOG_INFO("MFCreateSourceReaderFromByteStream returned: 0x%08lX", hr);
-                sattrs.reset();
+
                 if (FAILED(hr)) {
-                    LOG_ERROR("MFCreateSourceReaderFromByteStream failed: 0x%08lX", hr);
+                    LOG_ERROR("HLS source reader creation failed: 0x%08lX", hr);
                     return false;
                 }
             } else {
