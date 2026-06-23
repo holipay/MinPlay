@@ -168,10 +168,6 @@ private:
     int frame_stride_ = 0;
     PixelFormat frame_pix_fmt_ = PixelFormat::Unknown;
 
-    // Cached NV12 stride/height detection (avoids search loop every frame)
-    int cached_nv12_h_ = 0;
-    int cached_nv12_stride_ = 0;
-
     // Actual render FPS counter
     int render_frame_count_ = 0;
     double render_fps_timer_ = 0;

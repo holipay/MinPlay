@@ -761,54 +761,42 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     }
 
     if (vq_fmt == PixelFormat::NV12 && fh > 0 && cur_len_dw > 0) {
+        fs = 0;
         int found_h = fh;
-        // Try cached dimensions first (avoids search loop every frame)
-        if (cached_nv12_h_ > 0 && cached_nv12_stride_ >= fw) {
-            size_t nv12_rows = (size_t)cached_nv12_h_ * 3 / 2;
-            if (nv12_rows > 0 && (size_t)cached_nv12_stride_ * nv12_rows == (size_t)cur_len_dw) {
-                fs = cached_nv12_stride_; fh = cached_nv12_h_;
+        // Try exact match first
+        {
+            size_t nv12_rows = (size_t)fh * 3 / 2;
+            if (nv12_rows > 0) {
+                size_t s = (size_t)cur_len_dw / nv12_rows;
+                if (s >= (size_t)fw && s * nv12_rows == (size_t)cur_len_dw) {
+                    fs = (int)s; found_h = fh;
+                }
             }
         }
-        // Search if cache miss
+        // Search upward first
         if (fs == 0) {
-            // Try exact match first
-            {
-                size_t nv12_rows = (size_t)fh * 3 / 2;
-                if (nv12_rows > 0) {
-                    size_t s = (size_t)cur_len_dw / nv12_rows;
-                    if (s >= (size_t)fw && s * nv12_rows == (size_t)cur_len_dw) {
-                        fs = (int)s; found_h = fh;
-                    }
+            for (int h_try = fh + 2; h_try <= fh + 128; h_try += 2) {
+                size_t rows2 = (size_t)h_try * 3 / 2;
+                if (rows2 == 0) continue;
+                size_t s2 = (size_t)cur_len_dw / rows2;
+                if (s2 >= (size_t)fw && s2 * rows2 == (size_t)cur_len_dw) {
+                    fs = (int)s2; found_h = h_try; break;
                 }
             }
-            // Search upward first
-            if (fs == 0) {
-                for (int h_try = fh + 2; h_try <= fh + 128; h_try += 2) {
-                    size_t rows2 = (size_t)h_try * 3 / 2;
-                    if (rows2 == 0) continue;
-                    size_t s2 = (size_t)cur_len_dw / rows2;
-                    if (s2 >= (size_t)fw && s2 * rows2 == (size_t)cur_len_dw) {
-                        fs = (int)s2; found_h = h_try; break;
-                    }
-                }
-            }
-            // Search downward
-            if (fs == 0) {
-                for (int h_try = fh - 2; h_try > 0 && h_try >= fh - 64; h_try -= 2) {
-                    size_t rows2 = (size_t)h_try * 3 / 2;
-                    if (rows2 == 0) continue;
-                    size_t s2 = (size_t)cur_len_dw / rows2;
-                    if (s2 >= (size_t)fw && s2 * rows2 == (size_t)cur_len_dw) {
-                        fs = (int)s2; found_h = h_try; break;
-                    }
-                }
-            }
-            if (fs == 0) fs = fw;
-            fh = found_h;
-            // Cache for next frame
-            cached_nv12_h_ = fh;
-            cached_nv12_stride_ = fs;
         }
+        // Search downward
+        if (fs == 0) {
+            for (int h_try = fh - 2; h_try > 0 && h_try >= fh - 64; h_try -= 2) {
+                size_t rows2 = (size_t)h_try * 3 / 2;
+                if (rows2 == 0) continue;
+                size_t s2 = (size_t)cur_len_dw / rows2;
+                if (s2 >= (size_t)fw && s2 * rows2 == (size_t)cur_len_dw) {
+                    fs = (int)s2; found_h = h_try; break;
+                }
+            }
+        }
+        if (fs == 0) fs = fw;
+        fh = found_h;
     }
 
     if (vq_fmt == PixelFormat::YUY2 && fw > 0 && fh > 0) {
