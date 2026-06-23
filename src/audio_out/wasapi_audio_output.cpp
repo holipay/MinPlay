@@ -201,6 +201,8 @@ DWORD WasapiAudioOutput::PlaybackThreadProc() {
         DWORD wr = WaitForSingleObject(event_, 200);
         if (!playing_) break;
 
+        if (resetting_.load(std::memory_order_acquire)) continue;
+
         if (device_changed_.exchange(false, std::memory_order_acquire)) {
             if (!ReinitDevice()) {
                 LOG_ERROR("WASAPI: device reinit failed, continuing with old device");
@@ -522,12 +524,16 @@ void WasapiAudioOutput::Pause() { if (client_) client_->Stop(); }
 void WasapiAudioOutput::Resume() { if (client_) client_->Start(); }
 
 void WasapiAudioOutput::Reset() {
-    // Stop the audio engine — this drains any pending audio and makes
-    // GetCurrentPadding return an error, causing the playback thread to
-    // skip its iteration and retry on the next wake event.
+    // Signal playback thread to skip iterations while we reset
+    resetting_.store(true, std::memory_order_release);
+
+    // Stop the audio engine
     if (client_) client_->Stop();
 
-    // Reset ring buffer state (thread is idle because client is stopped)
+    // Wait briefly for playback thread to observe the resetting_ flag
+    Sleep(10);
+
+    // Reset ring buffer state
     ring_head_.store(0, std::memory_order_relaxed);
     ring_tail_.store(0, std::memory_order_relaxed);
     resample_frac_ = 0;
@@ -538,6 +544,8 @@ void WasapiAudioOutput::Reset() {
 
     // Restart audio engine — playback thread resumes naturally
     if (client_) client_->Start();
+
+    resetting_.store(false, std::memory_order_release);
 }
 
 void WasapiAudioOutput::SetVolume(float vol) {

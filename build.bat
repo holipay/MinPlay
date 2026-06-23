@@ -32,7 +32,7 @@ cl %OPTFLAGS% /W4 /utf-8 /EHsc ^
     src\sync\sync_context.cpp ^
     /Fe:MinPlay.exe ^
     /link user32.lib gdi32.lib ole32.lib oleaut32.lib shell32.lib ^
-          mf.lib mfplat.lib mfreadwrite.lib mfuuid.lib uuid.lib shlwapi.lib d3d11.lib dxgi.lib d3dcompiler.lib winhttp.lib
+          mf.lib mfplat.lib mfreadwrite.lib mfuuid.lib uuid.lib shlwapi.lib d3d11.lib dxgi.lib d3dcompiler.lib winhttp.lib winmm.lib
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo === BUILD SUCCESS ===

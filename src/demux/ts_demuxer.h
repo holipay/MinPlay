@@ -69,4 +69,7 @@ private:
 
     // Read buffer
     std::vector<uint8_t> read_buffer_;
+
+    // Residual bytes from previous read (partial TS packet)
+    std::vector<uint8_t> residual_;
 };

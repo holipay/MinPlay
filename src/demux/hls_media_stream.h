@@ -42,7 +42,10 @@ public:
     // Mark stream as ended
     void SetEos();
 
-    bool HasPendingRequest() const { return !tokens_.empty(); }
+    bool HasPendingRequest() const {
+        // Note: caller must hold token_lock_ for thread safety
+        return !tokens_.empty();
+    }
 
 private:
     HlsMediaSource* source_;
@@ -52,4 +55,5 @@ private:
 
     std::atomic<ULONG> ref_count_{1};
     std::queue<ComPtr<IUnknown>> tokens_;
+    CRITICAL_SECTION token_lock_;
 };

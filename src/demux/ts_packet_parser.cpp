@@ -62,7 +62,7 @@ bool TsPacketParser::ParsePacket(const uint8_t* data, int size, TsPacket& packet
                                      ((uint64_t)pcr_base_m2 << 9) |
                                      ((uint64_t)pcr_base_l << 1) |
                                      ((pcr_ext_h >> 7) & 0x01);
-                uint16_t pcr_ext = ((pcr_ext_h & 0x01) << 8) | data[offset + 6];
+                uint16_t pcr_ext = ((pcr_ext_h & 0x80) ? 0x100 : 0) | data[offset + 6];
 
                 packet.pcr = (int64_t)(pcr_base * 300 + pcr_ext);
                 packet.has_pcr = true;

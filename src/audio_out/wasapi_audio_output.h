@@ -98,6 +98,7 @@ private:
     std::atomic<int64_t> dropped_frames_{0};
     std::atomic<float> volume_{1.0f};
     std::atomic<bool> muted_{false};
+    std::atomic<bool> resetting_{false};
 
     friend struct AudioTest;
     int RingAvail() const;

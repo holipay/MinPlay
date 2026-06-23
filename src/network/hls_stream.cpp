@@ -417,7 +417,7 @@ void HlsByteStream::DiscardConsumedData() {
     // Scan for 0x47 sync byte at aligned position to confirm TS alignment.
     // If not found, try the next boundary (up to 188 bytes ahead).
     bool found_sync = false;
-    for (int try_offset = 0; try_offset < 188; try_offset += 188) {
+    for (int try_offset = 0; try_offset < 188; try_offset++) {
         int64_t candidate = aligned_pos + try_offset;
         // Search through segments to find the byte at candidate position
         for (auto& s : segs_) {
@@ -453,8 +453,6 @@ void HlsByteStream::DiscardConsumedData() {
         return;
     }
 
-    int64_t discard_bytes = (keep_from < segs_.size()) ? segs_[keep_from].offset : total_bytes_.load(std::memory_order_relaxed);
-
     // Calculate how many bytes to skip within the first kept segment
     int64_t skip_in_first = 0;
     if (keep_from < segs_.size()) {
@@ -471,6 +469,13 @@ void HlsByteStream::DiscardConsumedData() {
 
     // Erase fully consumed segments
     segs_.erase(segs_.begin(), segs_.begin() + keep_from);
+
+    // Trim partial data from the first kept segment
+    if (keep_from < segs_.size() && skip_in_first > 0) {
+        segs_[0].data.erase(segs_[0].data.begin(),
+                            segs_[0].data.begin() + (size_t)skip_in_first);
+    }
+
     if (segs_.capacity() > 64) segs_.shrink_to_fit();
 
     total_bytes_.store(new_offset, std::memory_order_relaxed);

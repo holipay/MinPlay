@@ -308,7 +308,7 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
         }
     }
 
-    if (is_nv12 && ps_nv12_) {
+    if (is_nv12 && ps_nv12_ && srv_y_ && srv_uv_) {
         ctx_->PSSetShader(ps_nv12_, nullptr, 0);
         ctx_->PSSetShaderResources(0, 1, &srv_y_);
         ID3D11ShaderResourceView* uv_srvs[1] = {srv_uv_};

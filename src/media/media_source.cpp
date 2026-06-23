@@ -166,20 +166,22 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback, bo
                 (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, amt.get());
             if (SUCCEEDED(hr)) {
                 // Verify actual output format — MF may not honor our request
-                ComPtr<IMFMediaType> actual;
-                if (SUCCEEDED(reader->GetCurrentMediaType(
-                        (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, &actual)) && actual) {
-                    UINT32 actual_bits = 0;
-                    actual->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &actual_bits);
-                    UINT32 actual_sr = 0, actual_ch = 0;
-                    actual->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &actual_sr);
-                    actual->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &actual_ch);
-                    GUID subtype;
-                    actual->GetGUID(MF_MT_SUBTYPE, &subtype);
-                    LOG_INFO("Audio: requested 16-bit PCM, got %u bit, %u Hz, %u ch, subtype=%08lX",
-                             actual_bits, actual_sr, actual_ch, subtype.Data1);
-                    if (actual_bits != 16) {
-                        LOG_WARN("Audio: MF did NOT honor 16-bit request! Got %u bit instead", actual_bits);
+                {
+                    ComPtr<IMFMediaType> actual;
+                    if (SUCCEEDED(reader->GetCurrentMediaType(
+                            (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, &actual)) && actual) {
+                        UINT32 actual_bits = 0;
+                        actual->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &actual_bits);
+                        UINT32 actual_sr = 0, actual_ch = 0;
+                        actual->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &actual_sr);
+                        actual->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &actual_ch);
+                        GUID subtype;
+                        actual->GetGUID(MF_MT_SUBTYPE, &subtype);
+                        LOG_INFO("Audio: requested 16-bit PCM, got %u bit, %u Hz, %u ch, subtype=%08lX",
+                                 actual_bits, actual_sr, actual_ch, subtype.Data1);
+                        if (actual_bits != 16) {
+                            LOG_WARN("Audio: MF did NOT honor 16-bit request! Got %u bit instead", actual_bits);
+                        }
                     }
                 }
                 has_audio_ = true;

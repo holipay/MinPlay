@@ -314,7 +314,7 @@ void Player::PauseToggle() {
         callback_->Stop();
         // Wait for any in-flight OnReadSample to finish (may hold stale ao_ pointer)
         DWORD wait_start = GetTickCount();
-        while (callback_->IsBusy() && (GetTickCount() - wait_start) < 3000) {
+        while (callback_->IsBusy() && (GetTickCount() - wait_start) < 500) {
             Sleep(10);
         }
         callback_->ClearPointers();
@@ -495,7 +495,8 @@ void Player::DrawOSD(HDC hdc) {
 
 bool Player::IsFinished() const {
     auto s = state_.load(std::memory_order_acquire);
-    if (s != PlayerState::Playing && s != PlayerState::Paused) return false;
+    if (s == PlayerState::Paused) return false;
+    if (s != PlayerState::Playing) return false;
     if (source_ && (source_->IsLive() || source_->Duration() <= 0)) return false;
     bool vq_empty;
     {
@@ -556,7 +557,6 @@ void Player::TryRestartLivePipeline() {
     if (!live_restarting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
 
-    live_restarting_.store(false, std::memory_order_release);
     PostMessage(hwnd_, WM_RESTART_LIVE, 0, source_generation_.load(std::memory_order_relaxed));
 }
 
@@ -695,6 +695,12 @@ void Player::ReopenSource() {
 
     if (source_) { source_->Close(); delete source_; source_ = nullptr; }
     if (callback_) { callback_->Release(); callback_ = nullptr; }
+
+    callback_ = new (std::nothrow) SourceReaderCallback();
+    if (!callback_) {
+        LOG_CRITICAL("ReopenSource: out of memory: callback_");
+        return;
+    }
 
     if (open_thread_.joinable())
         open_thread_.join();
@@ -893,6 +899,7 @@ void Player::VideoTick() {
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
         int drops_this_tick = 0;
+        int renders_this_tick = 0;
         while (true) {
             int head = vq_head_;
             int tail = vq_tail_;
@@ -916,10 +923,6 @@ void Player::VideoTick() {
                 break;
             }
             {
-                // Move the frame pointer from queue slot to render buffer.
-                // This eliminates a full-frame memcpy (~3MB per frame at 1080p).
-                // The old frame_buf_ is freed, and the queue slot's data pointer
-                // is nulled so it won't be double-freed when the slot is reused.
                 free(frame_buf_);
                 frame_buf_ = f->data;
                 frame_buf_size_ = f->size;
@@ -937,8 +940,10 @@ void Player::VideoTick() {
             f->size = 0;
             vq_head_ = next;
             callback_->ConsumeVideo();
+            renders_this_tick++;
             rendered = true;
-            break;
+            if (sd.diff_ms > -40.0 || !has_more)
+                break;
         }
     }
 

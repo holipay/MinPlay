@@ -470,7 +470,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
     LOG_INFO("Opening: %S", url);
 
+    // Raise WM_TIMER resolution from 15.6ms to 1ms for accurate video sync
+    timeBeginPeriod(1);
+
     int ret = RunMessageLoop();
+
+    timeEndPeriod(1);
 
     LOG_INFO("Message loop ended, cleaning up (ret=%d)", ret);
     KillTimer(g_hwnd, TIMER_AUDIO_CHECK);

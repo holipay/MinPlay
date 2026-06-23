@@ -92,11 +92,6 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
                 self->video_eof_.store(true, std::memory_order_release);
             else if (dwStreamIndex == self->audio_stream_)
                 self->audio_eof_.store(true, std::memory_order_release);
-            IMFSourceReader* r = self->reader_.load(std::memory_order_acquire);
-            if (r && self->running_.load(std::memory_order_acquire)) {
-                Sleep(50);
-                r->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
-            }
         }
         return S_OK;
     }

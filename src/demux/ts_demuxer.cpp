@@ -39,6 +39,16 @@ bool TsDemuxer::ReadAndDemux(HlsByteStream* bs) {
         return false;
     }
 
+    // Prepend residual bytes from previous read
+    if (!residual_.empty()) {
+        int total = (int)residual_.size() + (int)bytes_read;
+        std::vector<uint8_t> combined(total);
+        memcpy(combined.data(), residual_.data(), residual_.size());
+        memcpy(combined.data() + residual_.size(), read_buffer_.data(), bytes_read);
+        residual_.clear();
+        return FeedData(combined.data(), total);
+    }
+
     return FeedData(read_buffer_.data(), (int)bytes_read);
 }
 
@@ -101,6 +111,13 @@ bool TsDemuxer::FeedData(const uint8_t* data, int size) {
                 break;
             }
         }
+    }
+
+    // Save residual bytes (partial TS packet at end of buffer)
+    if (pos < raw_size) {
+        residual_.assign(raw + pos, raw + raw_size);
+    } else {
+        residual_.clear();
     }
 
     return true;

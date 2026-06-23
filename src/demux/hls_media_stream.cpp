@@ -7,6 +7,7 @@ HlsMediaStream::HlsMediaStream(HlsMediaSource* source, DWORD stream_id,
                                  IMFStreamDescriptor* sd)
     : source_(source), stream_id_(stream_id), stream_desc_(sd),
       event_queue_(nullptr) {
+    InitializeCriticalSection(&token_lock_);
     if (stream_desc_) stream_desc_->AddRef();
     MFCreateEventQueue(&event_queue_);
 }
@@ -14,6 +15,7 @@ HlsMediaStream::HlsMediaStream(HlsMediaSource* source, DWORD stream_id,
 HlsMediaStream::~HlsMediaStream() {
     if (event_queue_) { event_queue_->Shutdown(); event_queue_->Release(); }
     if (stream_desc_) stream_desc_->Release();
+    DeleteCriticalSection(&token_lock_);
 }
 
 // IUnknown
@@ -75,15 +77,24 @@ STDMETHODIMP HlsMediaStream::GetStreamDescriptor(IMFStreamDescriptor** ppStreamD
 }
 
 STDMETHODIMP HlsMediaStream::RequestSample(IUnknown* pToken) {
-    if (pToken) tokens_.push(ComPtr<IUnknown>(pToken));
+    if (pToken) {
+        EnterCriticalSection(&token_lock_);
+        tokens_.push(ComPtr<IUnknown>(pToken));
+        LeaveCriticalSection(&token_lock_);
+    }
     return S_OK;
 }
 
 void HlsMediaStream::DeliverFrame(const uint8_t* data, size_t size, double pts_sec) {
-    if (tokens_.empty()) return;
+    EnterCriticalSection(&token_lock_);
+    if (tokens_.empty()) {
+        LeaveCriticalSection(&token_lock_);
+        return;
+    }
 
     ComPtr<IUnknown> token = std::move(tokens_.front());
     tokens_.pop();
+    LeaveCriticalSection(&token_lock_);
 
     // Create sample
     ComPtr<IMFSample> sample;

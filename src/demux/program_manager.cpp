@@ -29,8 +29,9 @@ bool ProgramManager::ProcessPacket(const uint8_t* payload, int size, uint16_t pi
 bool ProgramManager::ParsePat(const uint8_t* data, int size) {
     if (size < 8) return false;
 
-    // Skip pointer field (1 byte)
-    int offset = 1;
+    // Skip pointer field
+    int pointer_field = data[0];
+    int offset = 1 + pointer_field;
 
     // Table ID (should be 0x00 for PAT)
     if (data[offset] != 0x00) return false;
@@ -73,7 +74,8 @@ bool ProgramManager::ParsePmt(const uint8_t* data, int size, uint16_t pid) {
     if (size < 12) return false;
 
     // Skip pointer field
-    int offset = 1;
+    int pointer_field = data[0];
+    int offset = 1 + pointer_field;
 
     // Table ID (should be 0x02 for PMT)
     if (data[offset] != 0x02) return false;

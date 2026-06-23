@@ -22,7 +22,7 @@ void OSD::Draw(HDC hdc,
     bool title_changed = false;
     if (title && track_count > 0) {
         char title_mb[200];
-        WideCharToMultiByte(CP_UTF8, 0, title, -1, title_mb, sizeof(title_mb), nullptr, nullptr);
+        WideCharToMultiByte(CP_ACP, 0, title, -1, title_mb, sizeof(title_mb), nullptr, nullptr);
         title_changed = (strcmp(cached_title_, title_mb) != 0);
         if (title_changed) {
             strncpy_s(cached_title_, title_mb, sizeof(cached_title_) - 1);
