@@ -475,6 +475,16 @@ void Player::Paint(HDC hdc, int /*w*/, int /*h*/) {
 }
 
 void Player::DrawOSD(HDC hdc) {
+    // Update render FPS counter
+    double now = GetTimeSec(perf_freq_);
+    render_frame_count_++;
+    if (render_fps_timer_ <= 0) render_fps_timer_ = now;
+    if (now - render_fps_timer_ >= 1.0) {
+        render_fps_display_ = render_frame_count_;
+        render_frame_count_ = 0;
+        render_fps_timer_ = now;
+    }
+
     if (osd_) {
         const wchar_t* track_title = nullptr;
         int track_idx = -1;
@@ -487,7 +497,7 @@ void Player::DrawOSD(HDC hdc) {
                 track_title = entry.title.c_str();
         }
         osd_->Draw(hdc, GetPosition(), GetDuration(),
-                   (int)video_fps_.load(std::memory_order_relaxed),
+                   render_fps_display_ > 0 ? render_fps_display_ : (int)video_fps_.load(std::memory_order_relaxed),
                    ao_ ? ao_->GetVolume() : 1.0f,
                    ao_ ? ao_->IsMuted() : false,
                    track_idx, track_count, track_title);

@@ -171,6 +171,11 @@ private:
     // Cached NV12 stride/height detection (avoids search loop every frame)
     int cached_nv12_h_ = 0;
     int cached_nv12_stride_ = 0;
+
+    // Actual render FPS counter
+    int render_frame_count_ = 0;
+    double render_fps_timer_ = 0;
+    int render_fps_display_ = 0;
     std::atomic<int> frame_w_{0};
     std::atomic<int> frame_h_{0};
     std::atomic<int> stride_{0};
