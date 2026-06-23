@@ -81,22 +81,48 @@ void WasapiAudioOutput::FillBuffer(BYTE* out, int out_frames) {
             return;
         }
 
-        // Read directly from ring buffer
-        int t = ring_tail_.load(std::memory_order_relaxed);
-        float vol = muted_.load(std::memory_order_acquire) ? 0.0f : volume_.load(std::memory_order_acquire);
-        bool apply_vol = (vol != 1.0f);
+        // Optimized 16-bit fast path: batch convert PCM16 → float
+        if (in_bits_ == 16 && in_ch == out_ch) {
+            int t = ring_tail_.load(std::memory_order_relaxed);
+            float vol = muted_.load(std::memory_order_acquire) ? 0.0f : volume_.load(std::memory_order_acquire);
+            bool apply_vol = (vol != 1.0f);
 
-        for (int f = 0; f < frames; f++) {
-            for (int ch = 0; ch < out_ch; ch++) {
-                int ic = ch < in_ch ? ch : 0;
-                int offset = (t + f * in_fb + ic * (in_bits_ / 8)) % ring_size_;
-                float s = ReadSample(ring_ + offset, in_bits_);
-                if (apply_vol) s *= vol;
-                out_f[f * out_ch + ch] = s;
+            // Handle ring buffer wrap-around in two chunks
+            int first_chunk = (std::min)(frames, (ring_size_ - t) / (int)in_fb);
+            int remaining = frames - first_chunk;
+
+            auto convert_chunk = [&](const uint8_t* src, int n) {
+                const int16_t* samples = (const int16_t*)src;
+                for (int i = 0; i < n * out_ch; i++) {
+                    float s = samples[i] / 32768.0f;
+                    if (apply_vol) s *= vol;
+                    *out_f++ = s;
+                }
+            };
+
+            convert_chunk(ring_ + t, first_chunk);
+            if (remaining > 0)
+                convert_chunk(ring_, remaining);
+
+            ring_tail_.store((t + frames * in_fb) % ring_size_, std::memory_order_release);
+        } else {
+            // Generic path: per-sample conversion
+            int t = ring_tail_.load(std::memory_order_relaxed);
+            float vol = muted_.load(std::memory_order_acquire) ? 0.0f : volume_.load(std::memory_order_acquire);
+            bool apply_vol = (vol != 1.0f);
+
+            for (int f = 0; f < frames; f++) {
+                for (int ch = 0; ch < out_ch; ch++) {
+                    int ic = ch < in_ch ? ch : 0;
+                    int offset = (t + f * in_fb + ic * (in_bits_ / 8)) % ring_size_;
+                    float s = ReadSample(ring_ + offset, in_bits_);
+                    if (apply_vol) s *= vol;
+                    out_f[f * out_ch + ch] = s;
+                }
             }
-        }
 
-        ring_tail_.store((t + frames * in_fb) % ring_size_, std::memory_order_release);
+            ring_tail_.store((t + frames * in_fb) % ring_size_, std::memory_order_release);
+        }
 
         if (frames < out_frames)
             memset(out_f + frames * out_ch, 0, (out_frames - frames) * out_ch * sizeof(float));
