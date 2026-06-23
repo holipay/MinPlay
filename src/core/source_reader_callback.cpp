@@ -63,10 +63,16 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
     if (FAILED(hrStatus) || (dwStreamFlags & MF_SOURCE_READERF_ERROR)) {
         LOG_WARN("OnReadSample FAILED stream=%lu hr=0x%08lX flags=0x%08lX",
                  dwStreamIndex, hrStatus, dwStreamFlags);
-        // Do NOT call reader_->Flush() here — FlushAndRestart() on the main
-        // thread also calls Flush(), and concurrent Flush() calls deadlock on
-        // MF's internal locks. Just post a timer to re-request; stale samples
-        // are discarded by the generation_ check.
+        // For CURRENTMEDIATYPECHANGED: this is normal during format negotiation
+        // with custom IMFMediaSource — re-request to let MF retry
+        if (dwStreamFlags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
+            LOG_INFO("Media type changed on stream %lu, re-requesting", dwStreamIndex);
+            IMFSourceReader* r = self->reader_.load(std::memory_order_acquire);
+            if (r && self->running_.load(std::memory_order_acquire))
+                r->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
+            return S_OK;
+        }
+        // For other errors: post timer to re-request
         Player* p = self->player_.load(std::memory_order_acquire);
         if (p && p->GetHwnd())
             PostMessage(p->GetHwnd(), WM_TIMER,
