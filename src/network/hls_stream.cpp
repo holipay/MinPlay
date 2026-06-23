@@ -825,10 +825,24 @@ bool HlsManager::Open(const wchar_t* url) {
         LOG_CRITICAL("Out of memory: HlsByteStream");
         return false;
     }
-    byte_stream_->SetCacheData(true);
+    byte_stream_->SetCacheData(!is_live_.load(std::memory_order_acquire));
 
-    // Start download thread to download segments in background.
-    // MFCreateSourceReaderFromByteStream + BeginRead will wait for data as needed.
+    // Pre-buffer first segment so MF has data to probe immediately.
+    // This avoids blocking in BeginRead during source reader creation.
+    LOG_INFO("HLS: Pre-buffering first segment...");
+    {
+        std::vector<uint8_t> seg_data;
+        if (!DownloadUrl(segments_[0].url.c_str(), seg_data)) {
+            LOG_WARN("HLS: Pre-buffer segment 0 failed");
+        } else {
+            LOG_INFO("HLS: Pre-buffer seg 0: %zu bytes", seg_data.size());
+            byte_stream_->AddSegment(std::move(seg_data));
+            consumed_up_to_.store(1, std::memory_order_release);
+            next_segment_to_download_.store(1, std::memory_order_release);
+        }
+    }
+
+    // Start download thread to download remaining segments in background
     download_thread_ = CreateThread(nullptr, 0,
         [](LPVOID arg) -> DWORD {
             ((HlsManager*)arg)->DownloadLoop();

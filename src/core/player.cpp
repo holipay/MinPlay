@@ -193,6 +193,7 @@ void Player::OpenAsync(std::wstring url, bool audio_only, int generation) {
 
     callback_->SetPlayer(this);
     callback_->SetLive(source_->IsLive() || source_->Duration() <= 0);
+    callback_->SetNetwork(is_network_);
     callback_->SetReader(source_->GetReader(),
                           source_->GetVideoStream(),
                           source_->GetAudioStream());

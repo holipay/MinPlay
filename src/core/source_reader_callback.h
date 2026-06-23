@@ -32,6 +32,7 @@ public:
     void SetPlayer(Player* player) { player_.store(player, std::memory_order_release); }
     void SetAudioOutput(class AudioOutput* ao) { ao_.store(ao, std::memory_order_release); }
     void SetLive(bool live) { is_live_ = live; }
+    void SetNetwork(bool network) { is_network_ = network; }
     void ClearPointers() {
         reader_.store(nullptr, std::memory_order_release);
         ao_.store(nullptr, std::memory_order_release);
@@ -69,4 +70,5 @@ private:
     HANDLE idle_event_ = nullptr;  // signaled when busy_ == 0
     std::atomic<LONG> generation_{0};
     bool is_live_ = false;
+    bool is_network_ = false;
 };

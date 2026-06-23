@@ -181,7 +181,11 @@ HRESULT SourceReaderCallback::OnReadSampleImpl(SourceReaderCallback* self, HRESU
         IMFSourceReader* r = self->reader_.load(std::memory_order_acquire);
         if (r && dwStreamIndex == self->audio_stream_) {
             AudioOutput* a = self->ao_.load(std::memory_order_acquire);
-            if (a && a->GetFree() > 256 * 1024)
+            // Re-request audio when ring buffer has space.
+            // Network streams: 64KB threshold (faster refill).
+            // Local files: 256KB threshold (less aggressive).
+            int free_threshold = self->is_network_ ? 64 * 1024 : 256 * 1024;
+            if (a && a->GetFree() > free_threshold)
                 r->ReadSample(dwStreamIndex, 0, nullptr, nullptr, nullptr, nullptr);
         } else if (r && dwStreamIndex == self->video_stream_ && pSample) {
             LONG vp = self->video_pending_.fetch_add(1, std::memory_order_relaxed) + 1;
