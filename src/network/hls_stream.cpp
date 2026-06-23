@@ -577,6 +577,7 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
     // Store request handle so Close() can cancel pending WinHTTP operations
     active_request_ = hRequest;
 
+    LOG_INFO("HLS: Sending request for %ws", url);
     if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
         WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
         active_request_ = nullptr;
@@ -584,6 +585,7 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
         return false;
     }
 
+    LOG_INFO("HLS: Receiving response...");
     if (!WinHttpReceiveResponse(hRequest, nullptr)) {
         active_request_ = nullptr;
         LOG_ERROR("WinHttpReceiveResponse failed: %u", GetLastError());
@@ -605,6 +607,7 @@ bool HlsManager::DownloadUrl(const wchar_t* url, std::vector<uint8_t>& out) {
     DWORD bytes_read = 0;
     const size_t MAX_DOWNLOAD_SIZE = 200 * 1024 * 1024;  // 200MB safety limit
     bool read_ok = true;
+    LOG_INFO("HLS: Reading data for %ws...", url);
     while (download_running_) {
         bytes_read = 0;
         if (!WinHttpReadData(hRequest, buf, sizeof(buf), &bytes_read)) {
@@ -824,9 +827,8 @@ bool HlsManager::Open(const wchar_t* url) {
     }
     byte_stream_->SetCacheData(true);
 
-    // Start download thread FIRST so it can download in parallel with pre-buffer.
-    // The download thread skips segments already consumed by pre-buffer.
-    LOG_INFO("HLS: Starting download thread early for parallel pre-buffer...");
+    // Start download thread to download segments in background.
+    // MFCreateSourceReaderFromByteStream + BeginRead will wait for data as needed.
     download_thread_ = CreateThread(nullptr, 0,
         [](LPVOID arg) -> DWORD {
             ((HlsManager*)arg)->DownloadLoop();
@@ -837,24 +839,6 @@ bool HlsManager::Open(const wchar_t* url) {
         download_running_ = false;
         return false;
     }
-
-    // Synchronous pre-buffer: download first segments so MF has enough data
-    // to probe TS format AND start demuxing immediately.
-    int prebuf_count = (std::min)(5, (int)segments_.size());
-    LOG_INFO("HLS: Pre-buffering %d segments...", prebuf_count);
-    for (int i = 0; i < prebuf_count; i++) {
-        std::vector<uint8_t> seg_data;
-        LOG_INFO("HLS: Downloading pre-buffer seg %d/%d...", i + 1, prebuf_count);
-        if (!DownloadUrl(segments_[i].url.c_str(), seg_data)) {
-            LOG_WARN("HLS: Pre-buffer segment %d failed", i);
-            continue;
-        }
-        LOG_INFO("HLS: Pre-buffer seg %d: %zu bytes", i + 1, seg_data.size());
-        byte_stream_->AddSegment(std::move(seg_data));
-        consumed_up_to_.store(i + 1, std::memory_order_release);
-        next_segment_to_download_.store(i + 1, std::memory_order_release);
-    }
-    LOG_INFO("HLS: Pre-buffer done");
 
     return true;
 }
