@@ -21,7 +21,12 @@ HlsMediaStream::~HlsMediaStream() {
 // IUnknown
 STDMETHODIMP HlsMediaStream::QueryInterface(REFIID riid, void** ppv) {
     if (!ppv) return E_POINTER;
-    if (riid == IID_IUnknown || riid == IID_IMFMediaEventGenerator) {
+    if (riid == IID_IUnknown) {
+        *ppv = static_cast<IMFMediaEventGenerator*>(this);
+        AddRef();
+        return S_OK;
+    }
+    if (riid == IID_IMFMediaEventGenerator) {
         *ppv = static_cast<IMFMediaEventGenerator*>(this);
         AddRef();
         return S_OK;

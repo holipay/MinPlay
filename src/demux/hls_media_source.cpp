@@ -87,7 +87,7 @@ STDMETHODIMP_(ULONG) HlsMediaSource::Release() {
 // IMFMediaSource
 STDMETHODIMP HlsMediaSource::GetCharacteristics(DWORD* pdwCharacteristics) {
     if (!pdwCharacteristics) return E_POINTER;
-    *pdwCharacteristics = MFMEDIASOURCE_IS_LIVE;
+    *pdwCharacteristics = MFMEDIASOURCE_IS_LIVE | MFMEDIASOURCE_CAN_PAUSE;
     return S_OK;
 }
 
@@ -189,18 +189,18 @@ STDMETHODIMP HlsMediaSource::Start(IMFPresentationDescriptor* pPD, const GUID* p
     if (is_started_) return E_FAIL;
     is_started_ = true;
 
-    // MF requires MEStreamStarted on each stream before samples can be delivered
+    // MF requires MEStarted on source event queue FIRST
+    if (event_queue_) {
+        event_queue_->QueueEventParamVar(MEStarted, GUID_NULL, S_OK, nullptr);
+    }
+
+    // Then MEStreamStarted on each stream's event queue
     if (video_stream_) video_stream_->QueueEvent(MEStreamStarted, GUID_NULL, S_OK, nullptr);
     if (audio_stream_) audio_stream_->QueueEvent(MEStreamStarted, GUID_NULL, S_OK, nullptr);
 
     // Start read thread
     read_running_ = true;
     read_thread_ = CreateThread(nullptr, 0, ReadThreadProc, this, 0, nullptr);
-
-    // MF requires MEStarted event after Start()
-    if (event_queue_) {
-        event_queue_->QueueEventParamVar(MEStarted, GUID_NULL, S_OK, nullptr);
-    }
 
     return S_OK;
 }
