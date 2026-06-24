@@ -165,6 +165,10 @@ void D3D11VideoOutput::EnsureTextures(int w, int h, int is_nv12) {
     if (tex_w_ == w && tex_h_ == h && tex_is_nv12_ == is_nv12 &&
         (is_nv12 ? tex_y_ : tex_rgb_)) return;
 
+    // Flush before destroying SRVs — ensures pending GPU draws don't
+    // reference stale views, avoiding device-removed on some drivers.
+    if (ctx_) ctx_->Flush();
+
     #define REL(x) if (x) { (x)->Release(); (x) = nullptr; }
     REL(srv_y_); REL(tex_y_); REL(srv_uv_); REL(tex_uv_);
     REL(srv_rgb_); REL(tex_rgb_);
@@ -222,6 +226,7 @@ void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride)
     hr = ctx_->Map(tex_y_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
     if (FAILED(hr)) { LOG_WARN("Map tex_y_ failed: 0x%08lX", hr); return; }
     {
+        memset(map.pData, 0, (size_t)map.RowPitch * h);
         int copy_w = (std::min)((int)map.RowPitch, stride);
         copy_w = (std::min)(copy_w, w);
         for (int row = 0; row < h; row++)
@@ -233,6 +238,7 @@ void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride)
     hr = ctx_->Map(tex_uv_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
     if (FAILED(hr)) { LOG_WARN("Map tex_uv_ failed: 0x%08lX", hr); return; }
     {
+        memset(map.pData, 0, (size_t)map.RowPitch * (h / 2));
         int copy_w = (std::min)((int)map.RowPitch, stride);
         copy_w = (std::min)(copy_w, w);
         const uint8_t* uv = data + (size_t)stride * h;
@@ -277,6 +283,11 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
         }
     }
     if (!rtv_) return;
+
+    // Flush GPU — ensures previous frame's Draw/Present is fully retired before
+    // we Map(WRITE_DISCARD) textures. Prevents driver stalls / stale-read corruption
+    // on Intel integrated GPUs where implicit sync can fail under memory pressure.
+    ctx_->Flush();
 
     int is_nv12 = (fmt == PixelFormat::NV12) ? 1 : 0;
     int src_stride = (stride > 0) ? stride : src_w;
@@ -344,6 +355,7 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
     ctx_->Draw(4, 0);
 
     if (overlay_func_ && osd_cooldown_ <= 0) {
+        ctx_->Flush();  // GPU sync before GetDC back buffer readback
         IDXGISurface1* surface = nullptr;
         if (SUCCEEDED(swap_->GetBuffer(0, IID_PPV_ARGS(&surface)))) {
             HDC hdc = nullptr;
