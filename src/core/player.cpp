@@ -940,8 +940,9 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         int next_tail = (vq_tail_ + 1) % VQ_SIZE;
         if (next_tail == vq_head_) {
             LOG_WARN("[BUF] VQ overflow — draining to half full (qsize=%d)", qsize);
-            // Drop frames until VQ is half full to prevent cascading overflow.
-            // Each dropped frame needs ConsumeVideo to balance video_pending_.
+            // Drop frames until VQ is half full. Do NOT call ConsumeVideo for dropped
+            // frames — the inflated pending count acts as natural backpressure,
+            // reducing ReadSample requests until VideoTick catches up.
             int target = VQ_SIZE / 2;
             while (qsize > target) {
                 free(vq_[vq_head_].data);
@@ -949,17 +950,15 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
                 vq_[vq_head_].size = 0;
                 vq_head_ = (vq_head_ + 1) % VQ_SIZE;
                 qsize--;
-                if (callback_) callback_->ConsumeVideo();
             }
         }
-        bool consumed_in_drop = (next_tail == vq_head_);
         VFrame* f = &vq_[vq_tail_];
         if (!f->data || f->size < frame_size) {
             free(f->data);
             f->data = (uint8_t*)malloc(frame_size);
             if (!f->data) {
                 LOG_CRITICAL("Out of memory: ProcessVideoFrame frame buffer");
-                if (!consumed_in_drop && callback_) callback_->ConsumeVideo();
+                if (callback_) callback_->ConsumeVideo();
                 free(converted);
                 buf->Unlock();
                 return;

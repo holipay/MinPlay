@@ -42,10 +42,10 @@ static void test_sync_render_within_window_small() {
 
 static void test_sync_threshold_edge() {
     SyncContext sc(0.040);
-    // exactly at drop threshold (2.0)
-    SyncDecision d = sc.Decide(10.0, 12.000001);
+    // exactly at drop threshold (0.150)
+    SyncDecision d = sc.Decide(10.0, 10.151);
     MU_CHECK_EQ((int)d.action, (int)SyncAction::Drop);
-    d = sc.Decide(10.0, 11.999999);
+    d = sc.Decide(10.0, 10.149);
     MU_CHECK_EQ((int)d.action, (int)SyncAction::Render);
 }
 

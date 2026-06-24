@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 HRESULT D3D11VideoOutput::CompileShader(const char* src, const char* target,
                                          ID3DBlob** blob) {
@@ -220,25 +221,23 @@ void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride)
     if (!tex_y_) { LOG_WARN("UploadNV12: tex_y_ is null"); return; }
     hr = ctx_->Map(tex_y_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
     if (FAILED(hr)) { LOG_WARN("Map tex_y_ failed: 0x%08lX", hr); return; }
-    UINT y_rp = map.RowPitch;
-    if (map.RowPitch == (UINT)stride) {
-        memcpy(map.pData, data, (SIZE_T)stride * h);
-    } else {
+    {
+        int copy_w = (std::min)((int)map.RowPitch, stride);
+        copy_w = (std::min)(copy_w, w);
         for (int row = 0; row < h; row++)
-            memcpy((uint8_t*)map.pData + row * map.RowPitch, data + row * stride, w);
+            memcpy((uint8_t*)map.pData + row * map.RowPitch, data + row * stride, copy_w);
     }
     ctx_->Unmap(tex_y_, 0);
 
     if (!tex_uv_) { LOG_WARN("UploadNV12: tex_uv_ is null"); return; }
     hr = ctx_->Map(tex_uv_, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
     if (FAILED(hr)) { LOG_WARN("Map tex_uv_ failed: 0x%08lX", hr); return; }
-    UINT uv_rp = map.RowPitch;
-    const uint8_t* uv = data + stride * h;
-    if (map.RowPitch == (UINT)stride) {
-        memcpy(map.pData, uv, (SIZE_T)stride * (h / 2));
-    } else {
+    {
+        int copy_w = (std::min)((int)map.RowPitch, stride);
+        copy_w = (std::min)(copy_w, w);
+        const uint8_t* uv = data + (size_t)stride * h;
         for (int row = 0; row < h / 2; row++)
-            memcpy((uint8_t*)map.pData + row * map.RowPitch, uv + row * stride, w);
+            memcpy((uint8_t*)map.pData + row * map.RowPitch, uv + row * stride, copy_w);
     }
     ctx_->Unmap(tex_uv_, 0);
 
@@ -249,8 +248,8 @@ void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride)
     QueryPerformanceFrequency(&freq);
     double sec = (double)(now.QuadPart - last_log) / freq.QuadPart;
     if (sec >= 1.0) {
-        LOG_INFO("[DIAG] UploadNV12: w=%d h=%d stride=%d y.rp=%u uv.rp=%u uv_offset=%d",
-                 w, h, stride, y_rp, uv_rp, stride * h);
+        LOG_INFO("[DIAG] UploadNV12: w=%d h=%d stride=%d uv_offset=%d",
+                 w, h, stride, (int)((size_t)stride * h));
         last_log = now.QuadPart;
     }
 }

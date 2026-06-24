@@ -12,8 +12,8 @@ struct SyncDecision {
 /*
  * A/V sync via frame drop/delay:
  *   sync_window_  — frames within ±this range of audio clock are rendered immediately
- *   drop_threshold_ — frames more than 5× sync_window behind audio are dropped
- *   wait_limit_   — frames ahead of audio wait at most this long (200 ms)
+ *   drop_threshold_ — frames more than this far behind audio are dropped (150 ms)
+ *   wait_limit_   — frames ahead of audio wait at most this long (500 ms)
  *
  * No audio speed adjustment: video-only correction.
  */
