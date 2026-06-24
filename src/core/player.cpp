@@ -883,25 +883,22 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         if (fs == 0) {
             fs = fw; // fallback
         }
-        // [DIAG] Log stride detection result once per second
+        // Log stride detection result once per second
         {
             static LONGLONG last_log = 0;
-            static DWORD last_buf = 0;
             LARGE_INTEGER now, freq;
             QueryPerformanceCounter(&now);
             QueryPerformanceFrequency(&freq);
             double sec = (double)(now.QuadPart - last_log) / freq.QuadPart;
-            bool buf_changed = (last_buf != 0 && last_buf != cur_len_dw);
-            if (sec >= 1.0 || buf_changed) {
+            if (sec >= 1.0) {
                 const char* mode;
                 if (found_h != init_fh)       mode = "height_search";
                 else if (fs > fw)             mode = "exact_match_padded";
                 else if (fs == fw && fs > 0)  mode = "exact_match_nopad";
                 else                          mode = "fallback_width";
-                LOG_INFO("[DIAG] NV12 stride detect: buf=%lu%s fw=%d fh=%d stride=%d found_h=%d mode=%s",
-                         cur_len_dw, buf_changed ? " CHANGED" : "", fw, init_fh, fs, found_h, mode);
+                LOG_INFO("NV12 stride: buf=%lu fw=%d fh=%d stride=%d found_h=%d mode=%s",
+                         cur_len_dw, fw, init_fh, fs, found_h, mode);
                 last_log = now.QuadPart;
-                last_buf = cur_len_dw;
             }
         }
         fh = found_h;
@@ -977,7 +974,6 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     free(converted);
     buf->Unlock();
 
-    // [DIAG] VQ health check every 60 frames
     {
         static LONG log_cnt = 0;
         if (++log_cnt % 60 == 0) {
@@ -988,7 +984,7 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
                 if (qsize < 0) qsize += VQ_SIZE;
             }
             LONG pending = callback_ ? callback_->GetVideoPending() : -1;
-            LOG_INFO("[DIAG] VQ: size=%d/%d pending=%d", qsize, VQ_SIZE, pending);
+            LOG_DEBUG("VQ: size=%d/%d pending=%d", qsize, VQ_SIZE, pending);
         }
     }
 

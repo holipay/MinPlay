@@ -51,9 +51,9 @@ private:
         "  float2 uv_samp = texUV.Sample(sam, uv).rg - 0.5;"
         "  Y *= 1.164;"
         "  return float4("
-        "    Y + 1.596 * uv_samp.g,"
-        "    Y - 0.391 * uv_samp.r - 0.813 * uv_samp.g,"
-        "    Y + 2.018 * uv_samp.r,"
+        "    Y + 1.5748 * uv_samp.g,"
+        "    Y - 0.1873 * uv_samp.r - 0.4681 * uv_samp.g,"
+        "    Y + 1.8556 * uv_samp.r,"
         "    1);"
         "}";
 

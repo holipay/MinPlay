@@ -288,7 +288,6 @@ IMFSourceReader* MediaSource::RecreateReader(IMFSourceReaderCallback* callback) 
     }
     sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
     sattrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, FALSE);
-    // Low latency for recreated reader
     sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
     if (callback) {
         sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);

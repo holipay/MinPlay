@@ -241,17 +241,7 @@ void D3D11VideoOutput::UploadNV12(const uint8_t* data, int w, int h, int stride)
     }
     ctx_->Unmap(tex_uv_, 0);
 
-    // [DIAG] Log NV12 upload geometry once per second
-    static LONGLONG last_log = 0;
-    LARGE_INTEGER now, freq;
-    QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&freq);
-    double sec = (double)(now.QuadPart - last_log) / freq.QuadPart;
-    if (sec >= 1.0) {
-        LOG_INFO("[DIAG] UploadNV12: w=%d h=%d stride=%d uv_offset=%d",
-                 w, h, stride, (int)((size_t)stride * h));
-        last_log = now.QuadPart;
-    }
+
 }
 
 void D3D11VideoOutput::UploadRGB32(const uint8_t* data, int w, int h) {
@@ -353,8 +343,6 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
 
     ctx_->Draw(4, 0);
 
-    // Draw GDI overlay (OSD) on the back buffer before Present.
-    // Skipped on most frames to avoid expensive GetDC GPU→CPU sync.
     if (overlay_func_ && osd_cooldown_ <= 0) {
         IDXGISurface1* surface = nullptr;
         if (SUCCEEDED(swap_->GetBuffer(0, IID_PPV_ARGS(&surface)))) {
@@ -365,7 +353,7 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
             }
             surface->Release();
         }
-        osd_cooldown_ = 15;  // ~500ms at 30fps
+        osd_cooldown_ = 15;
     }
     if (osd_cooldown_ > 0) osd_cooldown_--;
 
