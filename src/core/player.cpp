@@ -772,16 +772,23 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         }
     }
 
-    // Detect PTS discontinuity (segment boundary misalignment) — discard frame
-    // and a few successors to let decoder resync on next IDR.
+    // Detect PTS discontinuity (segment boundary misalignment) — discard current
+    // frame and drop 3 successors to let decoder resync on next IDR.
+    // Catches both backward jumps (>1s) and forward gaps (>1.5s) that indicate
+    // a segment boundary or PTS reset.
     {
         double pts = timestamp / 10000000.0;
         double prev = last_video_pts_.load(std::memory_order_acquire);
-        if (prev >= 0 && pts < prev - 1.0) {
-            LOG_WARN("Video PTS jump: %.3f -> %.3f (backward %.1fs), discarding", prev, pts, prev - pts);
-            last_video_pts_.store(pts, std::memory_order_release);
-            if (callback_) callback_->ConsumeVideo();
-            return;
+        if (prev >= 0) {
+            double gap = pts - prev;
+            if (gap < -1.0 || gap > 1.5) {
+                LOG_WARN("Video PTS discontinuity: %.3f -> %.3f (gap=%.1fs), discarding + drops next 3",
+                         prev, pts, gap);
+                restart_drop_frames_.store(3, std::memory_order_release);
+                last_video_pts_.store(pts, std::memory_order_release);
+                if (callback_) callback_->ConsumeVideo();
+                return;
+            }
         }
         last_video_pts_.store(pts, std::memory_order_release);
     }
@@ -872,7 +879,31 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
                 }
             }
         }
-        if (fs == 0) fs = fw;
+        int init_fh = fh; // preserve original height for mode classification
+        if (fs == 0) {
+            fs = fw; // fallback
+        }
+        // [DIAG] Log stride detection result once per second
+        {
+            static LONGLONG last_log = 0;
+            static DWORD last_buf = 0;
+            LARGE_INTEGER now, freq;
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&freq);
+            double sec = (double)(now.QuadPart - last_log) / freq.QuadPart;
+            bool buf_changed = (last_buf != 0 && last_buf != cur_len_dw);
+            if (sec >= 1.0 || buf_changed) {
+                const char* mode;
+                if (found_h != init_fh)       mode = "height_search";
+                else if (fs > fw)             mode = "exact_match_padded";
+                else if (fs == fw && fs > 0)  mode = "exact_match_nopad";
+                else                          mode = "fallback_width";
+                LOG_INFO("[DIAG] NV12 stride detect: buf=%lu%s fw=%d fh=%d stride=%d found_h=%d mode=%s",
+                         cur_len_dw, buf_changed ? " CHANGED" : "", fw, init_fh, fs, found_h, mode);
+                last_log = now.QuadPart;
+                last_buf = cur_len_dw;
+            }
+        }
         fh = found_h;
     }
 
@@ -904,12 +935,22 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
         was_empty = (vq_head_ == vq_tail_);
+        int qsize = vq_tail_ - vq_head_;
+        if (qsize < 0) qsize += VQ_SIZE;
         int next_tail = (vq_tail_ + 1) % VQ_SIZE;
         if (next_tail == vq_head_) {
-            int old_head = vq_head_;
-            vq_[old_head].size = 0;
-            vq_head_ = (old_head + 1) % VQ_SIZE;
-            if (callback_) callback_->ConsumeVideo();
+            LOG_WARN("[BUF] VQ overflow — draining to half full (qsize=%d)", qsize);
+            // Drop frames until VQ is half full to prevent cascading overflow.
+            // Each dropped frame needs ConsumeVideo to balance video_pending_.
+            int target = VQ_SIZE / 2;
+            while (qsize > target) {
+                free(vq_[vq_head_].data);
+                vq_[vq_head_].data = nullptr;
+                vq_[vq_head_].size = 0;
+                vq_head_ = (vq_head_ + 1) % VQ_SIZE;
+                qsize--;
+                if (callback_) callback_->ConsumeVideo();
+            }
         }
         bool consumed_in_drop = (next_tail == vq_head_);
         VFrame* f = &vq_[vq_tail_];
@@ -936,6 +977,21 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 
     free(converted);
     buf->Unlock();
+
+    // [DIAG] VQ health check every 60 frames
+    {
+        static LONG log_cnt = 0;
+        if (++log_cnt % 60 == 0) {
+            int qsize;
+            {
+                std::lock_guard<std::mutex> lock(vq_mutex_);
+                qsize = vq_tail_ - vq_head_;
+                if (qsize < 0) qsize += VQ_SIZE;
+            }
+            LONG pending = callback_ ? callback_->GetVideoPending() : -1;
+            LOG_INFO("[DIAG] VQ: size=%d/%d pending=%d", qsize, VQ_SIZE, pending);
+        }
+    }
 
     last_video_frame_time_.store(GetTimeSec(perf_freq_), std::memory_order_release);
 
@@ -991,6 +1047,21 @@ void Player::VideoTick() {
             SyncDecision sd = sync_->Decide(f->timestamp, audio_clk);
             int next = (head + 1) % VQ_SIZE;
             bool has_more = (next != tail);
+
+            // [DIAG] Log sync decisions (rate-limited)
+            {
+                static LONGLONG last_sync_log = 0;
+                LARGE_INTEGER now2, freq2;
+                QueryPerformanceCounter(&now2);
+                QueryPerformanceFrequency(&freq2);
+                double sec2 = (double)(now2.QuadPart - last_sync_log) / freq2.QuadPart;
+                if (sec2 >= 5.0) {
+                    LOG_INFO("[DIAG] Sync: act=%d diff_ms=%.1f pts=%.3f audio_clk=%.3f qsize=%d",
+                             (int)sd.action, sd.diff_ms, f->timestamp, audio_clk,
+                             (tail - head + ((tail < head) ? VQ_SIZE : 0)));
+                    last_sync_log = now2.QuadPart;
+                }
+            }
 
             if (sd.action == SyncAction::Drop && has_more && !in_grace && drops_this_tick < 2) {
                 free(f->data);

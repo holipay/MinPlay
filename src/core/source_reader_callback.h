@@ -49,6 +49,7 @@ public:
     void ResetVideoEof() { video_eof_.store(false, std::memory_order_release); }
     void ResetAudioEof() { audio_eof_.store(false, std::memory_order_release); }
     void ConsumeVideo() { video_pending_.fetch_sub(1, std::memory_order_relaxed); }
+    LONG GetVideoPending() const { return video_pending_.load(std::memory_order_relaxed); }
     bool IsBusy() const { return busy_.load(std::memory_order_acquire) > 0; }
     LONG GetGeneration() const { return generation_.load(std::memory_order_acquire); }
 
