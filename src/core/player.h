@@ -29,7 +29,7 @@ constexpr int AUDIO_BUFFER_NETWORK_MULT = 5;   // 5 × bitrate for network (5 s 
 constexpr int AUDIO_BUFFER_LOCAL_DIV   = 5;   // bitrate / 5 for local (200 ms buffer)
 
 // Video queue fill targets (out of VQ_SIZE = 32)
-constexpr int VIDEO_FILL_NETWORK = 15;  // keep 15+ frames for network
+constexpr int VIDEO_FILL_NETWORK = 12;  // keep ~12 frames for network (VQ_SIZE=16 → drain at 8)
 constexpr int VIDEO_FILL_LOCAL   = 3;   // 3+ frames for local files (~100ms at 30fps)
 
 // A/V sync defaults
@@ -110,7 +110,7 @@ private:
         PixelFormat pix_fmt = PixelFormat::Unknown;
     };
 
-    static constexpr int VQ_SIZE = 32;
+    static constexpr int VQ_SIZE = 16;
 
     HWND hwnd_ = nullptr;
     std::atomic<PlayerState> state_{PlayerState::Stopped};

@@ -1213,7 +1213,7 @@ void Player::CheckAudio() {
                     seconds = (std::max)(3.0, (std::min)(8.0, seconds));
                     audio_buffer_mult_.store(seconds, std::memory_order_release);
                     int vtarget = (int)(seconds * 15.0);
-                    vtarget = (std::max)(10, (std::min)(25, vtarget));
+                    vtarget = (std::max)(10, (std::min)(VQ_SIZE - 2, vtarget));
                     video_fill_target_.store(vtarget, std::memory_order_release);
                 }
             }
