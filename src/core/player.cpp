@@ -1205,17 +1205,22 @@ void Player::CheckAudio() {
             if (elapsed > 0) {
                 double instant_bw = (double)bytes / elapsed;
                 bandwidth_ema_ = bandwidth_ema_ * 0.8 + instant_bw * 0.2;
-                // Conservative adaptation: only adjust within safe bounds
-                // Audio: 3-8 seconds, Video: 10-25 frames
-                if (bandwidth_ema_ > 0 && audio_bytes_per_sec_ > 0) {
-                    double bps = (double)audio_bytes_per_sec_;
-                    double seconds = (bps * 6) / bandwidth_ema_;
-                    seconds = (std::max)(3.0, (std::min)(8.0, seconds));
-                    audio_buffer_mult_.store(seconds, std::memory_order_release);
-                    int vtarget = (int)(seconds * 15.0);
-                    vtarget = (std::max)(10, (std::min)(VQ_SIZE - 2, vtarget));
-                    video_fill_target_.store(vtarget, std::memory_order_release);
+                // Simple bandwidth-based adaptation:
+                //   fast  (>2 Mbps) → low latency (2s audio,  6 video frames)
+                //   mid   (>500 Kbps) → moderate (4s audio, 10 video frames)
+                //   slow  (else)     → safe     (8s audio, max video frames)
+                double a_sec; int vtarget;
+                if (bandwidth_ema_ > 2000000) {
+                    a_sec = 2.0;  vtarget = 6;
+                } else if (bandwidth_ema_ > 500000) {
+                    a_sec = 4.0;  vtarget = 10;
+                } else {
+                    a_sec = 8.0;  vtarget = (std::min)(VQ_SIZE - 2, 14);
                 }
+                audio_buffer_mult_.store(a_sec, std::memory_order_release);
+                video_fill_target_.store(vtarget, std::memory_order_release);
+                LOG_DEBUG("BW adapt: bw=%.0f bps audio=%.1fs video=%d frames",
+                          bandwidth_ema_, a_sec, vtarget);
             }
         }
     }
