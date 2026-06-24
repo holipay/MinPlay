@@ -8,4 +8,5 @@ public:
     virtual ~VideoOutput() = default;
     virtual void Render(const uint8_t* data, int src_w, int src_h, int stride, PixelFormat fmt) = 0;
     virtual void Resize(int w, int h) = 0;
+    virtual void ClearBackBuffer() {}
 };

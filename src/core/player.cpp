@@ -352,6 +352,7 @@ void Player::Seek(double seconds) {
     if (callback_) callback_->Stop();
     if (ao_) ao_->Reset();
     StopVideoTimer();
+    if (vo_) vo_->ClearBackBuffer();
 
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
@@ -364,6 +365,7 @@ void Player::Seek(double seconds) {
         vq_tail_ = 0;
     }
 
+    seek_target_pts_.store(seconds, std::memory_order_release);
     source_->Seek(seconds);
 
     frame_ready_ = false;
@@ -388,6 +390,7 @@ void Player::Seek(double seconds) {
     }
 
     video_first_frame_post_.store(1, std::memory_order_release);
+    seek_pending_.store(true, std::memory_order_release);
 
     if (was_playing) {
         state_.store(PlayerState::Playing, std::memory_order_release);
@@ -748,6 +751,20 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     if (state_.load(std::memory_order_acquire) != PlayerState::Playing) {
         if (callback_) callback_->ConsumeVideo();
         return;
+    }
+
+    // After seek, discard frames until we receive a frame at or past the seek target.
+    // Frames before the target reference stale decoder state from before the seek → 花屏.
+    if (seek_pending_.load(std::memory_order_acquire)) {
+        double pts = timestamp / 10000000.0;
+        double target = seek_target_pts_.load(std::memory_order_acquire);
+        if (pts >= target - 0.5) {
+            seek_pending_.store(false, std::memory_order_release);
+            LOG_DEBUG("Seek: first frame at target (pts=%.3f target=%.3f)", pts, target);
+        } else {
+            if (callback_) callback_->ConsumeVideo();
+            return;
+        }
     }
 
     ComPtr<IMFMediaBuffer> buf;

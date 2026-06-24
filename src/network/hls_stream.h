@@ -133,6 +133,7 @@ private:
     HANDLE data_event_ = nullptr;  // signaled by AddSegment when new data arrives
 
     ULONG CopyFromSegmentsLocked(BYTE* pb, ULONG cb);
+    void AlignReadPosToTsSyncByte();
 
     // Pending async read queue — BeginRead stores requests here when no data
     struct PendingRead {

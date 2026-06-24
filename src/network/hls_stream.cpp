@@ -96,16 +96,11 @@ STDMETHODIMP HlsByteStream::GetCapabilities(DWORD* pdwCapabilities) {
     *pdwCapabilities = MFBYTESTREAM_IS_READABLE
                      | MFBYTESTREAM_IS_SEEKABLE
                      | MFBYTESTREAM_IS_PARTIALLY_DOWNLOADED;
-    LOG_DEBUG("HlsBS: GetCapabilities -> 0x%08lX", *pdwCapabilities);
     return S_OK;
 }
 
 STDMETHODIMP HlsByteStream::GetLength(QWORD* pqwLength) {
     if (!pqwLength) return E_POINTER;
-    // MF's TS demuxer caches this value during initial probing.
-    // If we return the real (growing) length, MF thinks the stream ended
-    // when it reaches the first cached value. Return infinite fake length
-    // so MF keeps reading as new segments arrive.
     *pqwLength = 0x7FFFFFFFFFFFFFFF;
     return S_OK;
 }
@@ -124,10 +119,8 @@ STDMETHODIMP HlsByteStream::GetCurrentPosition(QWORD* pqwPosition) {
 }
 
 STDMETHODIMP HlsByteStream::SetCurrentPosition(QWORD qwPosition) {
-    LOG_DEBUG("HlsBS: SetCurrentPosition(%llu)", qwPosition);
     EnterCriticalSection(&lock_);
     read_pos_ = (int64_t)qwPosition;
-    // Clamp to actual data range — MF may seek beyond available data
     int64_t tb = total_bytes_.load(std::memory_order_acquire);
     if (read_pos_ > tb) read_pos_ = tb;
     if (read_pos_ < 0) read_pos_ = 0;
@@ -145,6 +138,40 @@ STDMETHODIMP HlsByteStream::IsEndOfStream(BOOL* pfEndOfStream) {
     LOG_DEBUG("HlsBS: IsEndOfStream -> %d (eos=%d pos=%lld total=%lld)",
              *pfEndOfStream, has_eos_marker_, rp, tb);
     return S_OK;
+}
+
+void HlsByteStream::AlignReadPosToTsSyncByte() {
+    const int TS_PACKET_SIZE = 188;
+    int64_t pos = read_pos_;
+    int64_t total = total_bytes_.load(std::memory_order_acquire);
+
+    for (int i = 0; i < TS_PACKET_SIZE; ++i) {
+        if (pos + i >= total)
+            break;
+
+        int seg_idx = -1;
+        int64_t off = 0;
+        for (int j = 0; j < (int)segs_.size(); j++) {
+            auto& s = segs_[j];
+            if (pos + i >= s.offset && pos + i < s.offset + (int64_t)s.data.size()) {
+                seg_idx = j;
+                off = pos + i - s.offset;
+                break;
+            }
+        }
+
+        if (seg_idx < 0)
+            continue;
+
+        auto& s = segs_[seg_idx];
+        if (off < 0 || off >= (int64_t)s.data.size())
+            continue;
+
+        if (s.data[(size_t)off] == 0x47) {
+            read_pos_ = pos + i;
+            return;
+        }
+    }
 }
 
 ULONG HlsByteStream::CopyFromSegmentsLocked(BYTE* pb, ULONG cb) {
@@ -173,8 +200,6 @@ ULONG HlsByteStream::CopyFromSegmentsLocked(BYTE* pb, ULONG cb) {
             cb -= (ULONG)to_copy;
             pb += to_copy;
             read_pos_ += to_copy;
-            // Free fully consumed segment data to prevent unbounded growth in live streams.
-            // For VOD (cache_data_=true) we keep data so seek-back can re-read it.
             if (!cache_data_ && offset_in_seg + (int64_t)to_copy >= (int64_t)seg.data.size()) {
                 seg.data.clear();
                 seg.data.shrink_to_fit();
@@ -268,19 +293,16 @@ STDMETHODIMP HlsByteStream::EndWrite(IMFAsyncResult*, ULONG*) { return E_NOTIMPL
 STDMETHODIMP HlsByteStream::Seek(MFBYTESTREAM_SEEK_ORIGIN SeekOrigin, LONGLONG llSeekOffset,
                                   DWORD /*dwSeekFlags*/, QWORD* pqwCurrentPosition) {
     EnterCriticalSection(&lock_);
-    int64_t old_pos = read_pos_.load(std::memory_order_relaxed);
-    if (SeekOrigin == 0) {  // MFBYTESTREAM_SEEK_ORIGIN_BEGIN
+    if (SeekOrigin == 0) {
         read_pos_ = llSeekOffset;
-    } else {  // MFBYTESTREAM_SEEK_ORIGIN_CURRENT (only two origins defined in SDK)
+    } else {
         read_pos_ = read_pos_.load(std::memory_order_relaxed) + llSeekOffset;
     }
     if (read_pos_ < 0) read_pos_ = 0;
     int64_t tb = total_bytes_.load(std::memory_order_acquire);
     if (read_pos_ > tb) read_pos_ = tb;
     if (pqwCurrentPosition) *pqwCurrentPosition = read_pos_;
-    int64_t new_pos = read_pos_;
     LeaveCriticalSection(&lock_);
-    LOG_DEBUG("HlsBS: Seek(origin=%d, offset=%lld) pos %lld -> %lld", (int)SeekOrigin, llSeekOffset, old_pos, new_pos);
     return S_OK;
 }
 

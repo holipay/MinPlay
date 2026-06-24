@@ -27,6 +27,7 @@ public:
 
     void Render(const uint8_t* data, int src_w, int src_h, int stride, PixelFormat fmt) override;
     void Resize(int w, int h) override;
+    void ClearBackBuffer() override;
 
     void SetOverlay(OverlayDrawFunc func, void* ctx) { overlay_func_ = func; overlay_ctx_ = ctx; }
 

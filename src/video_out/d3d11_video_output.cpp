@@ -143,6 +143,23 @@ bool D3D11VideoOutput::Initialize(HWND hwnd, int w, int h) {
     return true;
 }
 
+void D3D11VideoOutput::ClearBackBuffer() {
+    if (!swap_ || !device_) return;
+    if (IsIconic(hwnd_)) return;
+    if (!rtv_) {
+        ID3D11Texture2D* buf = nullptr;
+        if (SUCCEEDED(swap_->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&buf))) {
+            device_->CreateRenderTargetView(buf, nullptr, &rtv_);
+            buf->Release();
+        }
+    }
+    if (!rtv_) return;
+
+    float black[4] = {0, 0, 0, 1};
+    ctx_->ClearRenderTargetView(rtv_, black);
+    swap_->Present(0, 0);
+}
+
 void D3D11VideoOutput::EnsureTextures(int w, int h, int is_nv12) {
     if (tex_w_ == w && tex_h_ == h && tex_is_nv12_ == is_nv12 &&
         (is_nv12 ? tex_y_ : tex_rgb_)) return;
@@ -270,7 +287,7 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
 
     float clearColor[4] = {0, 0, 0, 1};
     ctx_->OMSetRenderTargets(1, &rtv_, nullptr);
-    // Note: fullscreen quad covers entire back buffer, no need for ClearRenderTargetView
+    ctx_->ClearRenderTargetView(rtv_, clearColor);
 
     D3D11_VIEWPORT vp = {0, 0, (float)win_w_, (float)win_h_, 0, 1};
     ctx_->RSSetViewports(1, &vp);

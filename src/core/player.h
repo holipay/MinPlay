@@ -188,6 +188,8 @@ private:
 
 
     std::atomic<LONG> video_first_frame_post_{0};
+    std::atomic<bool> seek_pending_{false};
+    std::atomic<double> seek_target_pts_{0};  // Discard video frames until pts >= this
 
     mutable int finished_debounce_ = 0;
     int win_w_ = 0;
