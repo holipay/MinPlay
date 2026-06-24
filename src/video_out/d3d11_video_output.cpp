@@ -354,8 +354,9 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
 
     ctx_->Draw(4, 0);
 
-    // Draw GDI overlay (OSD) on the back buffer before Present
-    if (overlay_func_) {
+    // Draw GDI overlay (OSD) on the back buffer before Present.
+    // Skipped on most frames to avoid expensive GetDC GPU→CPU sync.
+    if (overlay_func_ && osd_cooldown_ <= 0) {
         IDXGISurface1* surface = nullptr;
         if (SUCCEEDED(swap_->GetBuffer(0, IID_PPV_ARGS(&surface)))) {
             HDC hdc = nullptr;
@@ -365,7 +366,9 @@ void D3D11VideoOutput::Render(const uint8_t* data, int src_w, int src_h, int str
             }
             surface->Release();
         }
+        osd_cooldown_ = 15;  // ~500ms at 30fps
     }
+    if (osd_cooldown_ > 0) osd_cooldown_--;
 
     HRESULT hr = swap_->Present(0, 0);
     if (hr == DXGI_STATUS_OCCLUDED) {

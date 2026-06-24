@@ -97,6 +97,7 @@ private:
 
     OverlayDrawFunc overlay_func_ = nullptr;
     void* overlay_ctx_ = nullptr;
+    int osd_cooldown_ = 0;  // Skip OSD draw for this many Render() calls
 
     static HRESULT CompileShader(const char* src, const char* target, ID3DBlob** blob);
     void ReleaseD3D11();

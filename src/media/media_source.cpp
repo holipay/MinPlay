@@ -31,6 +31,7 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback, bo
     }
 
     sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    sattrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, FALSE);
     // Low latency: output data as soon as available, don't wait for full buffer
     sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
     if (callback) {
@@ -56,6 +57,7 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback, bo
                 hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
                 if (FAILED(hr)) return false;
                 sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+                sattrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, FALSE);
                 sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
                 if (callback) {
                     sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
@@ -285,6 +287,7 @@ IMFSourceReader* MediaSource::RecreateReader(IMFSourceReaderCallback* callback) 
         return nullptr;
     }
     sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    sattrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, FALSE);
     // Low latency for recreated reader
     sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
     if (callback) {
