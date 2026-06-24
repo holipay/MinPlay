@@ -51,56 +51,22 @@ bool MediaSource::Open(const wchar_t* url, IMFSourceReaderCallback* callback, bo
             reader.reset();
             LOG_INFO("About to call OpenHls...");
             if (OpenHls(url)) {
-                LOG_INFO("OpenHls succeeded, creating HlsMediaSource...");
+                LOG_INFO("OpenHls succeeded, creating source reader from byte stream...");
 
-                // Create custom IMFMediaSource with our own TsDemuxer
-                // (bypasses MF's msdatmpg.dll TS demuxer entirely)
-                ComPtr<IMFMediaSource> hls_source;
-                hr = HlsMediaSource::CreateInstance(hls_->GetByteStream(), &hls_source);
-                if (SUCCEEDED(hr)) {
-                    LOG_INFO("HlsMediaSource created successfully");
-
-                    hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
-                    if (FAILED(hr)) return false;
-                    sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-                    sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
-                    if (callback) {
-                        sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
-                    }
-                    LOG_INFO("Calling MFCreateSourceReaderFromMediaSource...");
-                    hr = MFCreateSourceReaderFromMediaSource(
-                        hls_source.get(), sattrs.get(), &reader);
-                    LOG_INFO("MFCreateSourceReaderFromMediaSource returned: 0x%08lX", hr);
-                    sattrs.reset();
-
-                    if (FAILED(hr)) {
-                        LOG_WARN("MFCreateSourceReaderFromMediaSource failed (%08lX), falling back to ByteStream", hr);
-                        hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
-                        if (FAILED(hr)) return false;
-                        sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-                        sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
-                        if (callback) {
-                            sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
-                        }
-                        hr = MFCreateSourceReaderFromByteStream(
-                            hls_->GetByteStream(), sattrs.get(), &reader);
-                        LOG_INFO("MFCreateSourceReaderFromByteStream returned: 0x%08lX", hr);
-                        sattrs.reset();
-                    }
-                } else {
-                    LOG_WARN("HlsMediaSource::CreateInstance failed (%08lX), falling back to ByteStream", hr);
-                    hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
-                    if (FAILED(hr)) return false;
-                    sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-                    sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
-                    if (callback) {
-                        sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
-                    }
-                    hr = MFCreateSourceReaderFromByteStream(
-                        hls_->GetByteStream(), sattrs.get(), &reader);
-                    LOG_INFO("MFCreateSourceReaderFromByteStream returned: 0x%08lX", hr);
-                    sattrs.reset();
+                hr = MFCreateAttributes(&sattrs, callback ? 3 : 2);
+                if (FAILED(hr)) return false;
+                sattrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+                sattrs->SetUINT32(MF_LOW_LATENCY, TRUE);
+                if (callback) {
+                    sattrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
                 }
+
+                // Use ByteStream path — HlsByteStream blocks on data_event_
+                // preventing MF from seeing premature EOF.
+                hr = MFCreateSourceReaderFromByteStream(
+                    hls_->GetByteStream(), sattrs.get(), &reader);
+                sattrs.reset();
+                LOG_INFO("MFCreateSourceReaderFromByteStream returned: 0x%08lX", hr);
 
                 if (FAILED(hr)) {
                     LOG_ERROR("HLS source reader creation failed: 0x%08lX", hr);
@@ -302,17 +268,10 @@ IMFSourceReader* MediaSource::RecreateReader(IMFSourceReaderCallback* callback) 
     // Discard consumed data, aligned to 188-byte TS packet boundaries
     bs->DiscardConsumedData();
 
-    // Wait for download thread to buffer enough data before creating reader.
-    // Without this, the new reader consumes the small remaining buffer in
-    // seconds and hits EOF again before new segments arrive → infinite loop.
-    int64_t min_bytes = 2000000;  // ~2MB, roughly 1 segment — fast restart
-    LOG_INFO("Waiting for data (want >= %lld bytes)...", min_bytes);
-    if (!bs->WaitForDataAmount(min_bytes, 10000)) {
-        int64_t cur = bs->GetTotalBytes();
-        LOG_WARN("Only %lld bytes after 10s, proceeding anyway", cur);
-    } else {
-        LOG_INFO("Data available, continuing recreation");
-    }
+    // Completely non-blocking — never block the main thread.
+    // The MF callback thread handles blocking reads from the byte stream.
+    // If no data is available, the new reader will block on its first
+    // ReadSample call in the callback thread, which is fine.
 
     // Create new attributes
     ComPtr<IMFAttributes> sattrs;
@@ -330,15 +289,16 @@ IMFSourceReader* MediaSource::RecreateReader(IMFSourceReaderCallback* callback) 
     }
 
     // Create new source reader from byte stream
+    // HlsByteStream blocks on data_event_ preventing premature EOF.
     ComPtr<IMFSourceReader> new_reader;
-    hr = MFCreateSourceReaderFromByteStream(
-        hls_->GetByteStream(), sattrs.get(), &new_reader);
+    hr = MFCreateSourceReaderFromByteStream(bs, sattrs.get(), &new_reader);
     sattrs.reset();
     if (FAILED(hr)) {
-        LOG_ERROR("MFCreateSourceReaderFromByteStream failed: 0x%08lX", hr);
+        LOG_ERROR("RecreateReader: MFCreateSourceReaderFromByteStream failed: 0x%08lX", hr);
         bs->Release();
         return nullptr;
     }
+    LOG_INFO("RecreateReader: source reader created from byte stream");
 
     // Re-set video output format on new reader
     if (has_video_) {

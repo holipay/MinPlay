@@ -142,6 +142,14 @@ private:
     std::atomic<double> post_restart_until_{0};  // Grace period: don't drop frames until this time
     std::atomic<int> source_generation_{0};  // Increments on each Open(); WM_RESTART_LIVE carries this
 
+    // Adaptive buffering for network streams
+    std::atomic<int> video_fill_target_{VIDEO_FILL_NETWORK};
+    std::atomic<double> audio_buffer_mult_{AUDIO_BUFFER_NETWORK_MULT};
+    std::atomic<int64_t> bandwidth_bytes_{0};   // Bytes received in current measurement window
+    std::atomic<double> bandwidth_sample_time_{0}; // Timestamp of last bandwidth sample
+    double bandwidth_ema_ = 0;                   // Exponential moving average (bytes/sec)
+    std::atomic<int> consecutive_stalls_{0};     // Stall count for adaptive cooldown
+
     // Async open (background thread)
     std::thread open_thread_;
     std::atomic<bool> open_running_{false};

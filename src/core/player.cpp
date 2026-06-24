@@ -549,6 +549,8 @@ void Player::TryRestartLivePipeline() {
 
     double now = GetTimeSec(perf_freq_);
     double last_frame = last_video_frame_time_.load(std::memory_order_acquire);
+
+    // Fixed 5s stall threshold — adaptive was too aggressive
     bool stalled = (last_frame > 0 && (now - last_frame) > 5.0);
 
     if (!stalled) return;
@@ -560,6 +562,7 @@ void Player::TryRestartLivePipeline() {
 
     LOG_INFO("Live/VOD: pipeline stalled for %.1fs, attempting recovery", now - last_frame);
 
+    // Fixed 15s cooldown — prevents restart storms
     double last_restart = last_restart_time_.load(std::memory_order_acquire);
     if (last_restart > 0 && (now - last_restart) < 15.0) return;
     last_restart_time_.store(now, std::memory_order_release);
@@ -611,15 +614,9 @@ void Player::FlushAndRestart() {
     if (!live_restarting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
 
-    LOG_INFO("Live: flushing + restarting pipeline");
-    // Stop callbacks and wait for in-flight to finish
-    callback_->Stop();
-    callback_->ResetVideoEof();
-    callback_->ResetAudioEof();
+    LOG_INFO("Live: flushing + restarting pipeline (background)");
 
-    // Clear video queue — stale frames cause fast playback after restart
-    // But keep the last rendered frame visible (frame_buf_ / frame_ready_)
-    // to avoid a black-screen freeze during the 3-4s restart window.
+    // Clear video queue on main thread (fast, under lock)
     {
         std::lock_guard<std::mutex> lock(vq_mutex_);
         for (int i = 0; i < VQ_SIZE; i++) {
@@ -630,37 +627,57 @@ void Player::FlushAndRestart() {
         vq_head_ = 0;
         vq_tail_ = 0;
     }
-    // Do NOT set frame_ready_ = false — keep last frame on screen
+    // Keep last frame visible — don't touch frame_ready_
 
-    // DO NOT reset audio ring buffer — let old audio play out naturally.
-    // Resetting would cause audio clock to jump to 0 while video clock
-    // continues from old value, creating massive A/V desync.
-    // The old buffered audio will drain naturally while new data arrives.
+    // Spawn background thread for the heavy work (Stop + RecreateReader + Start).
+    // This avoids blocking the main thread which would freeze the message loop.
+    // MFCreateSourceReaderFromByteStream blocks while MF probes the byte stream.
+    struct RestartCtx {
+        Player* self;
+        HWND hwnd;
+        int gen;
+    };
+    RestartCtx* ctx = new RestartCtx{this, hwnd_, source_generation_.load(std::memory_order_relaxed)};
 
-    // Recreate source reader to clear MF's internal EOF state
-    IMFSourceReader* new_reader = source_->RecreateReader(callback_);
-    if (new_reader) {
-        callback_->SetReader(new_reader,
-                             source_->GetVideoStream(),
-                             source_->GetAudioStream());
-    } else {
-        LOG_WARN("Live: RecreateReader failed, will retry later");
-        live_restarting_.store(false, std::memory_order_release);
-        return;
-    }
+    HANDLE thread = CreateThread(nullptr, 0, [](LPVOID param) -> DWORD {
+        RestartCtx* c = (RestartCtx*)param;
+        Player* p = c->self;
 
-    // DO NOT reset clock — keep old start_time_ so video continues
-    // from where it left off. New reader's PTS will align with audio clock.
-    // Resetting clock causes video to start from 0 while audio is at old position,
-    // creating the "fast-forward" effect as sync rapidly drops frames.
-    if (sync_) sync_->Seek();
-    // 2s grace period: don't drop frames after restart, let pipeline stabilize
-    post_restart_until_.store(GetTimeSec(perf_freq_) + 2.0, std::memory_order_release);
-    video_first_frame_post_.store(1, std::memory_order_release);
-    callback_->StartReading();
+        // Stop old callbacks
+        if (p->callback_) p->callback_->Stop();
+        if (p->callback_) p->callback_->ResetVideoEof();
+        if (p->callback_) p->callback_->ResetAudioEof();
 
-    LOG_INFO("Live: pipeline restarted");
-    live_restarting_.store(false, std::memory_order_release);
+        // Recreate source reader (may block on byte stream — safe on worker thread)
+        IMFSourceReader* new_reader = p->source_ ? p->source_->RecreateReader(p->callback_) : nullptr;
+        if (new_reader && p->callback_) {
+            p->callback_->SetReader(new_reader,
+                                    p->source_->GetVideoStream(),
+                                    p->source_->GetAudioStream());
+
+            // Reset sync clock
+            if (p->sync_) p->sync_->Seek();
+
+            // Set grace period
+            double grace = p->is_network_ ? 3.0 : 1.0;
+            p->post_restart_until_.store(p->GetTimeSec(p->perf_freq_) + grace, std::memory_order_release);
+            p->video_first_frame_post_.store(1, std::memory_order_release);
+
+            // Start reading on this thread — safe because we're not on the main thread
+            p->callback_->StartReading();
+            LOG_INFO("Live: pipeline restarted (grace=%.1fs)", grace);
+        } else {
+            LOG_WARN("Live: RecreateReader failed, scheduling retry");
+            if (p->hwnd_) SetTimer(p->hwnd_, TIMER_AUDIO_CHECK, 1000, nullptr);
+        }
+
+        p->live_restarting_.store(false, std::memory_order_release);
+        delete c;
+        return 0;
+    }, ctx, 0, nullptr);
+
+    if (thread) CloseHandle(thread);
+    // Main thread returns immediately — message loop stays responsive
 }
 
 void Player::ReopenSource() {
@@ -748,6 +765,14 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 
     const uint8_t* frame_data = data;
     int frame_size = (int)(std::min)(cur_len_dw, (DWORD)INT_MAX);
+
+    // Track bandwidth for adaptive buffering
+    if (is_network_) {
+        bandwidth_bytes_.fetch_add(frame_size, std::memory_order_relaxed);
+        if (bandwidth_sample_time_.load(std::memory_order_acquire) <= 0)
+            bandwidth_sample_time_.store(GetTimeSec(perf_freq_), std::memory_order_release);
+    }
+
     uint8_t* converted = nullptr;
 
     int fw, fh, fs;
@@ -876,8 +901,8 @@ void Player::VideoTick() {
     // Live HLS: if stream stalled and new data arrived, restart pipeline
     TryRestartLivePipeline();
 
-    // Keep pipeline fed (network: keep at least 15 frames buffered)
-    int video_fill_target = is_network_ ? VIDEO_FILL_NETWORK : VIDEO_FILL_LOCAL;
+    // Keep pipeline fed (network: adaptive fill target based on bandwidth)
+    int video_fill_target = is_network_ ? video_fill_target_.load(std::memory_order_acquire) : VIDEO_FILL_LOCAL;
     if (has_video_ && callback_ && !callback_->IsVideoEof()) {
         int qsize;
         {
@@ -955,6 +980,10 @@ void Player::VideoTick() {
     if (rendered && win_w_ > 0 && win_h_ > 0)
         if (!RenderD3D(win_w_, win_h_))
             LOG_WARN("RenderD3D: no frame rendered (vo_ uninitialized or no ready frame)");
+
+    // Reset stall counter when playback is healthy (frames rendering consistently)
+    if (rendered && is_network_)
+        consecutive_stalls_.store(0, std::memory_order_release);
 }
 
 void Player::OnVideoFormatChanged() {
@@ -1035,9 +1064,36 @@ void Player::CheckAudio() {
     if (has_audio_ && callback_ && !callback_->IsAudioEof()) {
         int buffered = ao_ ? ao_->GetBuffered() : 0;
         int bps = audio_bytes_per_sec_ > 0 ? audio_bytes_per_sec_ : (44100 * 2 * 2);
-        int threshold = (std::max)(1, is_network_ ? bps * AUDIO_BUFFER_NETWORK_MULT : bps / AUDIO_BUFFER_LOCAL_DIV);
+        double mult = audio_buffer_mult_.load(std::memory_order_acquire);
+        int threshold = (std::max)(1, (int)(bps * mult));
         if (buffered < threshold) {
             callback_->RequestAudioRead();
+        }
+    }
+
+    // Bandwidth estimation — sample every 2s for adaptive buffering
+    if (is_network_) {
+        double now = GetTimeSec(perf_freq_);
+        double last_sample = bandwidth_sample_time_.load(std::memory_order_acquire);
+        if (last_sample > 0 && (now - last_sample) >= 2.0) {
+            int64_t bytes = bandwidth_bytes_.exchange(0, std::memory_order_acq_rel);
+            double elapsed = now - last_sample;
+            bandwidth_sample_time_.store(now, std::memory_order_release);
+            if (elapsed > 0) {
+                double instant_bw = (double)bytes / elapsed;
+                bandwidth_ema_ = bandwidth_ema_ * 0.8 + instant_bw * 0.2;
+                // Conservative adaptation: only adjust within safe bounds
+                // Audio: 3-8 seconds, Video: 10-25 frames
+                if (bandwidth_ema_ > 0 && audio_bytes_per_sec_ > 0) {
+                    double bps = (double)audio_bytes_per_sec_;
+                    double seconds = (bps * 6) / bandwidth_ema_;
+                    seconds = (std::max)(3.0, (std::min)(8.0, seconds));
+                    audio_buffer_mult_.store(seconds, std::memory_order_release);
+                    int vtarget = (int)(seconds * 15.0);
+                    vtarget = (std::max)(10, (std::min)(25, vtarget));
+                    video_fill_target_.store(vtarget, std::memory_order_release);
+                }
+            }
         }
     }
 }

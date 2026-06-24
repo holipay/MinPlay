@@ -133,4 +133,14 @@ private:
     HANDLE data_event_ = nullptr;  // signaled by AddSegment when new data arrives
 
     ULONG CopyFromSegmentsLocked(BYTE* pb, ULONG cb);
+
+    // Pending async read queue — BeginRead stores requests here when no data
+    struct PendingRead {
+        BYTE* pb;
+        ULONG cb;
+        IMFAsyncCallback* callback;
+        IUnknown* state;
+    };
+    std::deque<PendingRead> pending_reads_;
+    void CompletePendingReadsLocked();  // Called by AddSegment when data arrives
 };

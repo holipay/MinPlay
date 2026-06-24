@@ -129,9 +129,62 @@ bool PesAssembler::GetNextFrame(PesFrame& frame) {
     if (frames_.empty()) return false;
     frame = std::move(frames_.front());
     frames_.erase(frames_.begin());
+    FormatOutput(frame.data);
     return true;
 }
 
 bool PesAssembler::HasFrames() const {
     return !frames_.empty();
+}
+
+void PesAssembler::FormatOutput(std::vector<uint8_t>& data) {
+    if (codec_ == StreamCodec::H264) {
+        EnsureAnnexB(data);
+    } else if (codec_ == StreamCodec::AAC) {
+        PrependADTS(data);
+    }
+}
+
+void PesAssembler::EnsureAnnexB(std::vector<uint8_t>& data) {
+    if (data.size() < 4) return;
+
+    // Check if data already has Annex B start code (00 00 00 01 or 00 00 01)
+    bool has_start_code = false;
+    if (data[0] == 0 && data[1] == 0) {
+        if (data[2] == 0 && data[3] == 1) has_start_code = true;
+        else if (data[2] == 1) has_start_code = true;
+    }
+
+    if (!has_start_code) {
+        // Some TS muxers strip start codes — add 4-byte Annex B start code
+        data.insert(data.begin(), {0x00, 0x00, 0x00, 0x01});
+    }
+}
+
+void PesAssembler::PrependADTS(std::vector<uint8_t>& data) {
+    if (data.size() < 2) return;
+
+    // Parse AudioSpecificConfig from first 2 bytes:
+    // Bits 0-4:  audioObjectType (2 = AAC-LC)
+    // Bits 5-8:  samplingFrequencyIndex
+    // Bits 9-12: channelConfiguration
+    uint16_t asc = ((uint16_t)data[0] << 8) | data[1];
+    int profile = ((asc >> 11) & 0x1F) - 1;  // ADTS profile = ASC object type - 1
+    int freq_idx = (asc >> 7) & 0x0F;
+    int channels = (asc >> 3) & 0x0F;
+
+    // AAC frame size = header (7 bytes) + raw data size
+    int frame_len = (int)data.size() + 7;
+
+    // 7-byte ADTS header
+    uint8_t adts[7];
+    adts[0] = 0xFF;                                          // Sync word
+    adts[1] = 0xF1;                                          // MPEG-4, Layer 0, no CRC
+    adts[2] = (uint8_t)((profile << 6) | (freq_idx << 2) | ((channels >> 2) & 0x01));
+    adts[3] = (uint8_t)(((channels & 0x03) << 6) | ((frame_len >> 11) & 0x03));
+    adts[4] = (uint8_t)((frame_len >> 3) & 0xFF);
+    adts[5] = (uint8_t)(((frame_len & 0x07) << 5) | 0x1F);
+    adts[6] = 0xFC;                                          // 0 raw data blocks
+
+    data.insert(data.begin(), adts, adts + 7);
 }

@@ -12,6 +12,7 @@
 #include <cstdint>
 
 class HlsManager;
+class HlsMediaSource;
 
 struct VideoInfo {
     int width = 0;

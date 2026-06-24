@@ -39,6 +39,10 @@ public:
     // Called by HlsMediaSource::ReadLoop to deliver a frame
     void DeliverFrame(const uint8_t* data, size_t size, double pts_sec);
 
+    // Stream lifecycle
+    void Start();
+    void Stop();
+
     // Mark stream as ended
     void SetEos();
 
@@ -56,4 +60,5 @@ private:
     std::atomic<ULONG> ref_count_{1};
     std::queue<ComPtr<IUnknown>> tokens_;
     CRITICAL_SECTION token_lock_;
+    bool is_started_ = false;
 };

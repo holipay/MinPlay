@@ -47,6 +47,15 @@ public:
     StreamType GetVideoStreamType() const { return video_stream_type_; }
     StreamType GetAudioStreamType() const { return audio_stream_type_; }
 
+    // Codec config extraction for MF's decoder MFTs
+    // Returns true and fills out_buf with AVCDecoderConfigurationRecord (avcC) data
+    bool GetVideoCodecConfig(std::vector<uint8_t>& out_buf) const;
+    // Returns true and fills out_buf with AudioSpecificConfig data
+    bool GetAudioCodecConfig(std::vector<uint8_t>& out_buf) const;
+    // Video resolution extracted from SPS (valid after first frame is processed)
+    int GetVideoWidth() const { return video_width_; }
+    int GetVideoHeight() const { return video_height_; }
+
 private:
     TsPacketParser parser_;
     PesAssembler video_assembler_;
@@ -72,4 +81,12 @@ private:
 
     // Residual bytes from previous read (partial TS packet)
     std::vector<uint8_t> residual_;
+
+    // Extracted codec config (populated from first frames)
+    std::vector<uint8_t> video_codec_config_;  // AVCDecoderConfigurationRecord
+    std::vector<uint8_t> audio_codec_config_;  // AudioSpecificConfig
+    bool video_config_extracted_ = false;
+    bool audio_config_extracted_ = false;
+    int video_width_ = 0;
+    int video_height_ = 0;
 };

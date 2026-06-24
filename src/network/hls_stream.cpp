@@ -64,6 +64,7 @@ HlsByteStream::HlsByteStream() {
 }
 
 HlsByteStream::~HlsByteStream() {
+    Abort();  // Complete any pending reads before destruction
     Clear();
     if (data_event_) CloseHandle(data_event_);
     DeleteCriticalSection(&lock_);
@@ -101,10 +102,11 @@ STDMETHODIMP HlsByteStream::GetCapabilities(DWORD* pdwCapabilities) {
 
 STDMETHODIMP HlsByteStream::GetLength(QWORD* pqwLength) {
     if (!pqwLength) return E_POINTER;
-    EnterCriticalSection(&lock_);
-    *pqwLength = total_bytes_;
-    LeaveCriticalSection(&lock_);
-    LOG_DEBUG("HlsBS: GetLength -> %llu", *pqwLength);
+    // MF's TS demuxer caches this value during initial probing.
+    // If we return the real (growing) length, MF thinks the stream ended
+    // when it reaches the first cached value. Return infinite fake length
+    // so MF keeps reading as new segments arrive.
+    *pqwLength = 0x7FFFFFFFFFFFFFFF;
     return S_OK;
 }
 
@@ -125,6 +127,10 @@ STDMETHODIMP HlsByteStream::SetCurrentPosition(QWORD qwPosition) {
     LOG_DEBUG("HlsBS: SetCurrentPosition(%llu)", qwPosition);
     EnterCriticalSection(&lock_);
     read_pos_ = (int64_t)qwPosition;
+    // Clamp to actual data range — MF may seek beyond available data
+    int64_t tb = total_bytes_.load(std::memory_order_acquire);
+    if (read_pos_ > tb) read_pos_ = tb;
+    if (read_pos_ < 0) read_pos_ = 0;
     LeaveCriticalSection(&lock_);
     return S_OK;
 }
@@ -196,32 +202,13 @@ STDMETHODIMP HlsByteStream::Read(BYTE* pb, ULONG cb, ULONG* pcbRead) {
     if (total_read == 0 && has_eos_marker_ && read_pos_ >= total_bytes_) {
         LeaveCriticalSection(&lock_);
         if (pcbRead) *pcbRead = 0;
-        LOG_DEBUG("HlsBS: Read(%u) -> S_FALSE (EOS)", cb);
         return S_FALSE;
     }
 
-    // If no data available, wait for new data via manual-reset event
-    if (total_read == 0) {
-        ResetEvent(data_event_);
-        LeaveCriticalSection(&lock_);
-        for (int i = 0; i < 300; i++) {
-            WaitForSingleObject(data_event_, 200);
-            EnterCriticalSection(&lock_);
-            if (closed_) { LeaveCriticalSection(&lock_); break; }
-            total_read = CopyFromSegmentsLocked(pb, cb);
-            LeaveCriticalSection(&lock_);
-            if (total_read > 0) break;
-            // Re-check EOS after wait
-            EnterCriticalSection(&lock_);
-            bool eos = (has_eos_marker_ && read_pos_ >= total_bytes_);
-            LeaveCriticalSection(&lock_);
-            if (eos) break;
-            ResetEvent(data_event_);
-        }
-    }
-
+    // No blocking — return immediately with whatever data is available (possibly 0).
+    // MF will call Read again when more data arrives.
+    LeaveCriticalSection(&lock_);
     if (pcbRead) *pcbRead = total_read;
-    if (total_read > 0) return S_OK;
     return S_OK;
 }
 
@@ -232,40 +219,39 @@ STDMETHODIMP HlsByteStream::BeginRead(BYTE* pb, ULONG cb, IMFAsyncCallback* pCal
     if (!pb || !pCallback) return E_POINTER;
 
     EnterCriticalSection(&lock_);
-    if (closed_) { LeaveCriticalSection(&lock_); return E_ABORT; }
-    ULONG bytesRead = CopyFromSegmentsLocked(pb, cb);
-    bool is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
-
-    // Wait for data only when we got nothing (bytesRead == 0) and no EOS.
-    // Do NOT wait on short reads — video demuxer needs data immediately,
-    // and the TS demuxer handles short reads at segment boundaries fine.
-    if (bytesRead == 0 && !is_eos && !closed_) {
-        ResetEvent(data_event_);
+    if (closed_) {
         LeaveCriticalSection(&lock_);
-        for (int i = 0; i < 300; i++) {
-            WaitForSingleObject(data_event_, 200);
-            EnterCriticalSection(&lock_);
-            if (closed_) { LeaveCriticalSection(&lock_); break; }
-            bytesRead = CopyFromSegmentsLocked(pb, cb);
-            is_eos = (bytesRead == 0 && has_eos_marker_ && read_pos_ >= total_bytes_);
-            LeaveCriticalSection(&lock_);
-            if (bytesRead > 0 || is_eos) break;
-            ResetEvent(data_event_);
-        }
-        EnterCriticalSection(&lock_);
+        return E_ABORT;
     }
 
-    async_result_.store(bytesRead, std::memory_order_release);
-    async_hr_.store(is_eos ? S_FALSE : S_OK, std::memory_order_release);
+    ULONG bytesRead = CopyFromSegmentsLocked(pb, cb);
+
+    // Rule 1: Has data → complete immediately
+    if (bytesRead > 0) {
+        async_result_.store(bytesRead, std::memory_order_release);
+        async_hr_.store(S_OK, std::memory_order_release);
+        LeaveCriticalSection(&lock_);
+
+        ComPtr<IMFAsyncResult> ar;
+        MFCreateAsyncResult(nullptr, pCallback, pState, &ar);
+        MFInvokeCallback(ar.get());
+        return S_OK;
+    }
+
+    // Rule 2: No data → pending. Do NOT complete callback. Do NOT return 0 bytes.
+    // Store the request; AddSegment will complete it when data arrives.
+    PendingRead req;
+    req.pb = pb;
+    req.cb = cb;
+    req.callback = pCallback;
+    req.state = pState;
+    pCallback->AddRef();
+    if (pState) pState->AddRef();
+    pending_reads_.push_back(req);
+
+    LOG_DEBUG("HlsBS: BeginRead(%u) -> pending (%zu in queue)", cb, pending_reads_.size());
     LeaveCriticalSection(&lock_);
-
-    LOG_DEBUG("HlsBS: BeginRead(%u) -> %lu bytes (eos=%d)", cb, bytesRead, is_eos);
-
-    ComPtr<IMFAsyncResult> result;
-    if (SUCCEEDED(MFCreateAsyncResult(nullptr, pCallback, pState, &result))) {
-        return MFInvokeCallback(result.get());
-    }
-    return S_OK;
+    return S_OK;  // S_OK = pending, callback NOT called yet
 }
 
 STDMETHODIMP HlsByteStream::EndRead(IMFAsyncResult* /*pResult*/, ULONG* pcbRead) {
@@ -309,9 +295,25 @@ STDMETHODIMP HlsByteStream::Close() {
 }
 
 void HlsByteStream::Abort() {
-    LOG_WARN("HlsBS: Abort() — unblocking pending reads");
+    LOG_WARN("HlsBS: Abort() — completing pending reads with E_ABORT");
     EnterCriticalSection(&lock_);
     closed_ = true;
+
+    // Complete all pending reads with E_ABORT
+    while (!pending_reads_.empty()) {
+        PendingRead req = pending_reads_.front();
+        pending_reads_.pop_front();
+
+        async_result_.store(0, std::memory_order_release);
+        async_hr_.store(E_ABORT, std::memory_order_release);
+
+        ComPtr<IMFAsyncResult> ar;
+        MFCreateAsyncResult(nullptr, req.callback, req.state, &ar);
+        LeaveCriticalSection(&lock_);
+        MFInvokeCallback(ar.get());
+        EnterCriticalSection(&lock_);
+    }
+
     LeaveCriticalSection(&lock_);
     if (data_event_) SetEvent(data_event_);
 }
@@ -329,10 +331,43 @@ void HlsByteStream::AddSegment(std::vector<uint8_t> data) {
 
     needs_wake_.store(1, std::memory_order_release);
 
+    // Complete any pending BeginRead requests now that data is available
+    CompletePendingReadsLocked();
+
     LeaveCriticalSection(&lock_);
 
-    // Wake up any blocked BeginRead/Read waiting for data
+    // Wake up any blocked Read/WaitForData
     if (data_event_) SetEvent(data_event_);
+}
+
+void HlsByteStream::CompletePendingReadsLocked() {
+    // Must be called with lock_ held
+    while (!pending_reads_.empty()) {
+        PendingRead req = pending_reads_.front();
+        pending_reads_.pop_front();
+
+        ULONG bytesRead = CopyFromSegmentsLocked(req.pb, req.cb);
+
+        // Only complete if we got data or stream is closed/EOS
+        if (bytesRead > 0 || closed_ ||
+            (has_eos_marker_ && read_pos_ >= total_bytes_)) {
+            async_result_.store(bytesRead, std::memory_order_release);
+            async_hr_.store((bytesRead == 0 && has_eos_marker_) ? S_FALSE : S_OK,
+                           std::memory_order_release);
+
+            ComPtr<IMFAsyncResult> ar;
+            MFCreateAsyncResult(nullptr, req.callback, req.state, &ar);
+
+            // Release lock before invoking callback (callback may re-enter)
+            LeaveCriticalSection(&lock_);
+            MFInvokeCallback(ar.get());
+            EnterCriticalSection(&lock_);
+        } else {
+            // Still no data — put it back at front and stop
+            pending_reads_.push_front(req);
+            break;
+        }
+    }
 }
 
 bool HlsByteStream::CheckAndClearNeedsWake() {
@@ -985,16 +1020,18 @@ void HlsManager::DownloadLoop() {
         if (!DownloadUrl(url.c_str(), seg_data)) {
             if (!download_running_) break;
             retry_count++;
-            if (retry_count >= 3) {
-                LOG_WARN("HLS: Skipping segment %d after %d failures", idx, 3);
+            if (retry_count >= 5) {
+                LOG_WARN("HLS: Skipping segment %d after %d failures", idx, retry_count);
                 consumed_up_to_.store(idx + 1, std::memory_order_release);
                 next_segment_to_download_.store(idx + 1, std::memory_order_release);
                 retry_count = 0;
                 continue;
             }
-            LOG_WARN("HLS: Failed to download segment %d (attempt %d/3), retrying",
-                     idx, retry_count);
-            WaitForSingleObject(wake_event_, 1000);
+            // Exponential backoff: 1s, 2s, 4s, 8s
+            DWORD backoff_ms = 1000 * (1 << (retry_count - 1));
+            LOG_WARN("HLS: Failed to download segment %d (attempt %d/5), retrying in %ums",
+                     idx, retry_count, backoff_ms);
+            WaitForSingleObject(wake_event_, backoff_ms);
             continue;
         }
         retry_count = 0;

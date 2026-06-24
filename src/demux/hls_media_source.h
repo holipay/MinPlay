@@ -20,7 +20,7 @@ class HlsMediaStream;
 class HlsMediaSource : public IMFMediaSourceEx,
                         public IMFGetService {
 public:
-    static HRESULT CreateInstance(HlsByteStream* byte_stream, IMFMediaSource** ppSource);
+    static HRESULT CreateInstance(HlsByteStream* byte_stream, bool is_live, IMFMediaSource** ppSource);
 
     // IUnknown
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override;
@@ -54,11 +54,12 @@ public:
     HlsByteStream* GetByteStream() const { return byte_stream_; }
 
 private:
-    HlsMediaSource(HlsByteStream* byte_stream);
+    HlsMediaSource(HlsByteStream* byte_stream, bool is_live);
     ~HlsMediaSource();
 
     HlsByteStream* byte_stream_;
     TsDemuxer demuxer_;
+    bool is_live_;
 
     std::atomic<ULONG> ref_count_{1};
     CRITICAL_SECTION lock_;

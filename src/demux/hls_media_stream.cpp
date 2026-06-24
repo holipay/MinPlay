@@ -18,20 +18,11 @@ HlsMediaStream::~HlsMediaStream() {
     DeleteCriticalSection(&token_lock_);
 }
 
-// IUnknown
+// IUnknown — use IMFMediaStream* as canonical pointer (first base in chain)
 STDMETHODIMP HlsMediaStream::QueryInterface(REFIID riid, void** ppv) {
     if (!ppv) return E_POINTER;
-    if (riid == IID_IUnknown) {
-        *ppv = static_cast<IMFMediaEventGenerator*>(this);
-        AddRef();
-        return S_OK;
-    }
-    if (riid == IID_IMFMediaEventGenerator) {
-        *ppv = static_cast<IMFMediaEventGenerator*>(this);
-        AddRef();
-        return S_OK;
-    }
-    if (riid == IID_IMFMediaStream) {
+    if (riid == IID_IUnknown || riid == IID_IMFMediaEventGenerator || riid == IID_IMFMediaStream) {
+        // All share one pointer: IMFMediaStream inherits from IMFMediaEventGenerator from IUnknown
         *ppv = static_cast<IMFMediaStream*>(this);
         AddRef();
         return S_OK;
@@ -131,4 +122,21 @@ void HlsMediaStream::SetEos() {
     if (event_queue_) {
         event_queue_->QueueEventParamVar(MEEndOfStream, GUID_NULL, S_OK, nullptr);
     }
+}
+
+void HlsMediaStream::Start() {
+    is_started_ = true;
+    if (event_queue_) {
+        event_queue_->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, nullptr);
+    }
+}
+
+void HlsMediaStream::Stop() {
+    is_started_ = false;
+    if (event_queue_) {
+        event_queue_->QueueEventParamVar(MEStreamStopped, GUID_NULL, S_OK, nullptr);
+    }
+    EnterCriticalSection(&token_lock_);
+    while (!tokens_.empty()) tokens_.pop();
+    LeaveCriticalSection(&token_lock_);
 }
