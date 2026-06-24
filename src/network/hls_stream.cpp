@@ -452,11 +452,12 @@ void HlsByteStream::ResetForRestart() {
 
 /*
  * Discard segments that have already been consumed by MF.
- * Aligns the cut point to a TS packet boundary (188 bytes, sync byte 0x47)
- * so the new source reader can correctly probe the TS container format.
+ * Aligns the cut point to a HLS SEGMENT boundary (not TS packet boundary)
+ * so the new source reader starts at a segment boundary where PAT/PMT +
+ * SPS/PPS + IDR are present, preventing mid-GOP decoder corruption.
  *
  * After discarding, read_pos_ is reset to 0 and remaining segment offsets
- * are shifted so the byte stream starts fresh from a TS packet boundary.
+ * are shifted so the byte stream starts from a clean segment start.
  */
 void HlsByteStream::DiscardConsumedData() {
     EnterCriticalSection(&lock_);
@@ -468,30 +469,32 @@ void HlsByteStream::DiscardConsumedData() {
         return;
     }
 
-    // Align pos down to nearest 188-byte TS packet boundary
-    int64_t aligned_pos = (pos / 188) * 188;
+    // Align to segment boundary — find the segment containing read_pos_
+    // and start from its beginning. This ensures the new MFSourceReader
+    // starts at a clean GOP boundary (PAT/PMT + SPS/PPS + IDR).
+    int64_t aligned_pos = 0;
+    for (auto& s : segs_) {
+        if (pos >= s.offset && pos < s.offset + (int64_t)s.data.size()) {
+            aligned_pos = s.offset;
+            break;
+        }
+    }
 
-    // Scan for 0x47 sync byte at aligned position to confirm TS alignment.
-    // If not found, try the next boundary (up to 188 bytes ahead).
-    bool found_sync = false;
-    for (int try_offset = 0; try_offset < 188; try_offset++) {
-        int64_t candidate = aligned_pos + try_offset;
-        // Search through segments to find the byte at candidate position
+    // If pos is not within any segment (between segments or at end),
+    // find the next segment with data.
+    if (aligned_pos == 0) {
         for (auto& s : segs_) {
-            if (candidate >= s.offset && candidate < s.offset + (int64_t)s.data.size()) {
-                int64_t idx_in_seg = candidate - s.offset;
-                if (s.data.size() > (size_t)idx_in_seg && s.data[(size_t)idx_in_seg] == 0x47) {
-                    aligned_pos = candidate;
-                    found_sync = true;
-                    break;
-                }
+            if (s.offset >= pos && !s.data.empty()) {
+                aligned_pos = s.offset;
+                break;
             }
         }
-        if (found_sync) break;
     }
-    if (!found_sync) {
-        // Fallback: use 188-byte alignment even without confirmed sync byte
-        LOG_WARN("HlsBS: DiscardConsumedData — no 0x47 sync found, using 188-byte alignment");
+
+    if (aligned_pos <= 0) {
+        LeaveCriticalSection(&lock_);
+        LOG_DEBUG("HlsBS: DiscardConsumedData — no segment found at pos %lld", pos);
+        return;
     }
 
     // Find first segment that contains or is after aligned_pos
@@ -504,17 +507,10 @@ void HlsByteStream::DiscardConsumedData() {
         keep_from++;
     }
 
-    if (keep_from == 0 && aligned_pos <= 0) {
+    if (keep_from >= segs_.size()) {
         LeaveCriticalSection(&lock_);
-        LOG_DEBUG("HlsBS: DiscardConsumedData — nothing to discard");
+        LOG_DEBUG("HlsBS: DiscardConsumedData — nothing to keep");
         return;
-    }
-
-    // Calculate how many bytes to skip within the first kept segment
-    int64_t skip_in_first = 0;
-    if (keep_from < segs_.size()) {
-        skip_in_first = aligned_pos - segs_[keep_from].offset;
-        if (skip_in_first < 0) skip_in_first = 0;
     }
 
     // Shift remaining segments' offsets to start from 0
@@ -524,14 +520,12 @@ void HlsByteStream::DiscardConsumedData() {
         new_offset += segs_[i].data.size();
     }
 
-    // Erase fully consumed segments
+    // Erase fully consumed segments (before the alignment point)
     segs_.erase(segs_.begin(), segs_.begin() + keep_from);
 
-    // Trim partial data from the first kept segment
-    if (keep_from < segs_.size() && skip_in_first > 0) {
-        segs_[0].data.erase(segs_[0].data.begin(),
-                            segs_[0].data.begin() + (size_t)skip_in_first);
-    }
+    // IMPORTANT: We do NOT trim the first kept segment. Keeping the full
+    // segment ensures the new source reader starts at a segment boundary
+    // with valid PAT/PMT + SPS/PPS + IDR, avoiding mid-GOP corruption.
 
     if (segs_.capacity() > 64) segs_.shrink_to_fit();
 
@@ -539,7 +533,7 @@ void HlsByteStream::DiscardConsumedData() {
     read_pos_ = 0;
 
     LeaveCriticalSection(&lock_);
-    LOG_INFO("HlsBS: DiscardConsumedData — discarded to TS-aligned pos %lld (was %lld), %zu segments remaining, total_bytes=%lld",
+    LOG_INFO("HlsBS: DiscardConsumedData — aligned to segment boundary at %lld (was %lld), %zu segments remaining, total_bytes=%lld",
              aligned_pos, pos, segs_.size(), new_offset);
 }
 

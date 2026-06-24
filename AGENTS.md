@@ -139,6 +139,8 @@ User interaction (v0.1.1):
 | 2026-06 | HLS no video after source reader creation | `Flush()` implementation cancelled pending reads during MF's initial byte stream probing. MF calls `IMFByteStream::Flush()` during `MFCreateSourceReaderFromByteStream` to reset state, then continues reading. Our implementation destroyed all queued `BeginRead` requests with `E_ABORT`, so MF saw zero data and never detected video/audio stream formats. | Revert `Flush()` to no-op (`return S_OK`). MF's TS demuxer manages its own flush semantics; cancelling pending reads at the byte stream level breaks probing. |
 | 2026-06 | HLS seek 花屏 (ghosting/残影) | After seek, the D3D11 swap chain back buffer retains the old rendered frame until the first new frame arrives. No `ClearRenderTargetView` existed. Letterbox/pillarbox edges also retained stale content. | Added `ClearBackBuffer()` to `D3D11VideoOutput`; call from `Player::Seek()` after clearing video queue. Added `ClearRenderTargetView` in `Render()` before drawing quad. |
 | 2026-06 | HLS seek shows corrupted frames | After seek, MF's decoder still holds stale reference frames from before the seek position. B/P-frames reference old I-frames → 花屏 until next keyframe. | Added `seek_pending_` flag + `seek_target_pts_` in Player. After seek, all video frames discarded until a frame arrives with PTS within 0.5s of seek target. |
+| 2026-06 | HLS live intermittent 花屏 | After `FlushAndRestart` pipeline restart, `DiscardConsumedData` aligned to TS packet boundary (188 bytes) — could start mid-GOP. New source reader starts at a non-keyframe boundary → decoder outputs corrupted P/B-frames until next IDR. | Changed `DiscardConsumedData` to align to HLS SEGMENT boundary (segment start offset). New reader always starts at segment start where PAT/PMT + SPS/PPS + IDR are present. Added `restart_drop_frames_` (3 frames) safety net in `ProcessVideoFrame`. |
+| 2026-06 | HLS 花屏 (NV12 stride odd height) | NV12 stride detection used `h * 3 / 2` which gives wrong row count for odd heights (e.g., 1081). Stride detection fails → UV plane offset miscalculated → wrong pixel data decoded → visual corruption. | Replaced `h * 3 / 2` with `h + ceil(h/2)` via lambda `Nv12Rows()`. Also updated `ReconfigureVideo()` to read `MF_MT_DEFAULT_STRIDE` on every format change (previously stride was never updated). |
 
 ## Known Limitations
 
@@ -152,6 +154,6 @@ User interaction (v0.1.1):
 
 **Impact:** Video freezes for 1-2 seconds every 5-10 seconds. Audio may have brief interruptions. Not a crash — playback resumes after restart.
 
-**Current mitigation:** `FlushAndRestart` recreates the source reader to clear MF's internal EOF state. `DiscardConsumedData` with TS 188-byte alignment ensures the new reader can probe the stream correctly.
+**Current mitigation:** `FlushAndRestart` recreates the source reader to clear MF's internal EOF state. `DiscardConsumedData` aligns to HLS segment boundary (not TS packet boundary) so the new reader starts at a clean GOP boundary with PAT/PMT + SPS/PPS + IDR present, preventing mid-GOP corruption. `restart_drop_frames_` (3 frames) provides a safety net in `ProcessVideoFrame`.
 
 **Potential solution:** Replace MF's TS demuxer with FFmpeg's `libavformat` (which supports flushable EOF state and custom I/O callbacks). This is a major architectural change (2-3 days).

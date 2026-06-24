@@ -237,13 +237,16 @@ void MediaSource::ReconfigureVideo() {
         UINT32 w = 0, h = 0, num = 0, den = 0;
         GetUint64Pair(mt.get(), MF_MT_FRAME_SIZE, &w, &h);
         GetUint64Pair(mt.get(), MF_MT_FRAME_RATE, &num, &den);
-        // Only update if resolution actually changed (ignore stride padding)
+        if (den > 0) vi_.fps = (double)num / den;
+        // Always update stride — can change even when resolution stays the same
+        // (e.g., different alignment padding from adaptive bitrate switch).
+        vi_.stride = (int)MFGetAttributeUINT32(mt.get(), MF_MT_DEFAULT_STRIDE, 0);
+        // Only update width/height if resolution actually changed (ignore stride padding)
         if (w > 0 && h > 0 &&
             (abs((int)w - vi_.width) > 16 || abs((int)h - vi_.height) > 16)) {
             vi_.width = (int)w;
             vi_.height = (int)h;
         }
-        if (den > 0) vi_.fps = (double)num / den;
 
         GUID subtype;
         if (SUCCEEDED(mt->GetGUID(MF_MT_SUBTYPE, &subtype))) {

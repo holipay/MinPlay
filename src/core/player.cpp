@@ -631,6 +631,10 @@ void Player::FlushAndRestart() {
         vq_tail_ = 0;
     }
     // Keep last frame visible — don't touch frame_ready_
+    // Drop first few frames after restart as safety net for mid-GOP decoder corruption.
+    // Segment-boundary alignment (DiscardConsumedData) handles the common case,
+    // this catches edge cases where segment doesn't start with a keyframe.
+    restart_drop_frames_.store(3, std::memory_order_release);
 
     // Spawn background thread for the heavy work (Stop + RecreateReader + Start).
     // This avoids blocking the main thread which would freeze the message loop.
@@ -760,11 +764,26 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         double target = seek_target_pts_.load(std::memory_order_acquire);
         if (pts >= target - 0.5) {
             seek_pending_.store(false, std::memory_order_release);
+            last_video_pts_.store(pts, std::memory_order_release);
             LOG_DEBUG("Seek: first frame at target (pts=%.3f target=%.3f)", pts, target);
         } else {
             if (callback_) callback_->ConsumeVideo();
             return;
         }
+    }
+
+    // Detect PTS discontinuity (segment boundary misalignment) — discard frame
+    // and a few successors to let decoder resync on next IDR.
+    {
+        double pts = timestamp / 10000000.0;
+        double prev = last_video_pts_.load(std::memory_order_acquire);
+        if (prev >= 0 && pts < prev - 1.0) {
+            LOG_WARN("Video PTS jump: %.3f -> %.3f (backward %.1fs), discarding", prev, pts, prev - pts);
+            last_video_pts_.store(pts, std::memory_order_release);
+            if (callback_) callback_->ConsumeVideo();
+            return;
+        }
+        last_video_pts_.store(pts, std::memory_order_release);
     }
 
     ComPtr<IMFMediaBuffer> buf;
@@ -782,6 +801,18 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
 
     const uint8_t* frame_data = data;
     int frame_size = (int)(std::min)(cur_len_dw, (DWORD)INT_MAX);
+
+    // After pipeline restart, drop a few frames to skip any mid-GOP
+    // decoder corruption (safety net for DiscardConsumedData edge cases).
+    if (restart_drop_frames_.load(std::memory_order_acquire) > 0) {
+        int remaining = restart_drop_frames_.fetch_sub(1, std::memory_order_acq_rel);
+        if (remaining > 0) {
+            LOG_DEBUG("Restart: dropping frame (%d remaining)", remaining - 1);
+            buf->Unlock();
+            if (callback_) callback_->ConsumeVideo();
+            return;
+        }
+    }
 
     // Track bandwidth for adaptive buffering
     if (is_network_) {
@@ -805,9 +836,13 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
     if (vq_fmt == PixelFormat::NV12 && fh > 0 && cur_len_dw > 0) {
         fs = 0;
         int found_h = fh;
+        // NV12 total rows = Y rows + UV rows = h + ceil(h/2)
+        auto Nv12Rows = [](int height) -> size_t {
+            return (size_t)height + (size_t)(height + 1) / 2;
+        };
         // Try exact match first
         {
-            size_t nv12_rows = (size_t)fh * 3 / 2;
+            size_t nv12_rows = Nv12Rows(fh);
             if (nv12_rows > 0) {
                 size_t s = (size_t)cur_len_dw / nv12_rows;
                 if (s >= (size_t)fw && s * nv12_rows == (size_t)cur_len_dw) {
@@ -818,7 +853,7 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         // Search upward first
         if (fs == 0) {
             for (int h_try = fh + 2; h_try <= fh + 128; h_try += 2) {
-                size_t rows2 = (size_t)h_try * 3 / 2;
+                size_t rows2 = Nv12Rows(h_try);
                 if (rows2 == 0) continue;
                 size_t s2 = (size_t)cur_len_dw / rows2;
                 if (s2 >= (size_t)fw && s2 * rows2 == (size_t)cur_len_dw) {
@@ -829,7 +864,7 @@ void Player::ProcessVideoFrame(IMFSample* sample, LONGLONG timestamp) {
         // Search downward
         if (fs == 0) {
             for (int h_try = fh - 2; h_try > 0 && h_try >= fh - 64; h_try -= 2) {
-                size_t rows2 = (size_t)h_try * 3 / 2;
+                size_t rows2 = Nv12Rows(h_try);
                 if (rows2 == 0) continue;
                 size_t s2 = (size_t)cur_len_dw / rows2;
                 if (s2 >= (size_t)fw && s2 * rows2 == (size_t)cur_len_dw) {

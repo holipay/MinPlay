@@ -189,7 +189,9 @@ private:
 
     std::atomic<LONG> video_first_frame_post_{0};
     std::atomic<bool> seek_pending_{false};
-    std::atomic<double> seek_target_pts_{0};  // Discard video frames until pts >= this
+    std::atomic<double> seek_target_pts_{0};
+    std::atomic<double> last_video_pts_{-1};  // Track PTS jumps at segment boundaries
+    std::atomic<int> restart_drop_frames_{0}; // Drop N frames after pipeline restart to skip mid-GOP corruption
 
     mutable int finished_debounce_ = 0;
     int win_w_ = 0;
