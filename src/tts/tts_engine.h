@@ -11,7 +11,6 @@ public:
     TtsEngine();
     ~TtsEngine();
 
-    bool Initialize();
     void Start(HWND hwnd, const std::vector<std::wstring>& sentences, int start = 0);
     void Stop();
     void Pause();

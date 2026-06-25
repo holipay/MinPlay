@@ -235,9 +235,8 @@ void Player::OpenTextAsync(std::wstring url, int generation) {
     }
 
     tts_ = new (std::nothrow) TtsEngine();
-    if (!tts_ || !tts_->Initialize()) {
-        LOG_ERROR("Failed to initialize TTS engine");
-        delete tts_; tts_ = nullptr;
+    if (!tts_) {
+        LOG_ERROR("Failed to create TTS engine");
         open_ok_ = false;
         PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, generation);
         return;
