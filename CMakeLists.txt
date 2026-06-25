@@ -16,6 +16,8 @@ add_executable(MinPlay
     src/util/osd.cpp
     src/util/yuv_convert.cpp
     src/sync/sync_context.cpp
+    src/tts/text_reader.cpp
+    src/tts/tts_engine.cpp
 )
 
 target_link_libraries(MinPlay PRIVATE
@@ -34,6 +36,7 @@ target_link_libraries(MinPlay PRIVATE
     dxgi
     d3dcompiler
     winhttp
+    sapi
 )
 
 target_include_directories(MinPlay PRIVATE src)

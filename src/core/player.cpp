@@ -3,6 +3,7 @@
 #include "../util/yuv_convert.h"
 #include "../video_out/d3d11_video_output.h"
 #include "../audio_out/wasapi_audio_output.h"
+#include "../tts/text_reader.h"
 #include "../util/log.h"
 #include <cstdlib>
 #include <cstring>
@@ -10,6 +11,14 @@
 #include <algorithm>
 #include <new>
 #include <thread>
+
+static bool IsTextFile(const std::wstring& url) {
+    if (url.find(L"://") != std::wstring::npos) return false;
+    size_t dot = url.rfind(L'.');
+    if (dot == std::wstring::npos) return false;
+    std::wstring ext = url.substr(dot);
+    return (_wcsicmp(ext.c_str(), L".txt") == 0);
+}
 
 Player::Player() {
     QueryPerformanceFrequency(&perf_freq_);
@@ -86,6 +95,12 @@ bool Player::Open(HWND hwnd, const wchar_t* url, bool audio_only) {
 }
 
 void Player::OpenAsync(std::wstring url, bool audio_only, int generation) {
+    // TTS path for text files
+    if (IsTextFile(url)) {
+        OpenTextAsync(url, generation);
+        return;
+    }
+
     source_ = new (std::nothrow) MediaSource();
     if (!source_) {
         LOG_CRITICAL("Out of memory: source_");
@@ -202,6 +217,42 @@ void Player::OpenAsync(std::wstring url, bool audio_only, int generation) {
     PostMessage(hwnd_, WM_OPEN_COMPLETE, 1, generation);
 }
 
+void Player::OpenTextAsync(std::wstring url, int generation) {
+    std::wstring text = TextReader::Read(url.c_str());
+    if (text.empty()) {
+        LOG_ERROR("Failed to read text file: %S", url.c_str());
+        open_ok_ = false;
+        PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, generation);
+        return;
+    }
+
+    tts_sentences_ = TextReader::SplitSentences(text);
+    if (tts_sentences_.empty()) {
+        LOG_ERROR("Text file contains no readable content");
+        open_ok_ = false;
+        PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, generation);
+        return;
+    }
+
+    tts_ = new (std::nothrow) TtsEngine();
+    if (!tts_ || !tts_->Initialize()) {
+        LOG_ERROR("Failed to initialize TTS engine");
+        delete tts_; tts_ = nullptr;
+        open_ok_ = false;
+        PostMessage(hwnd_, WM_OPEN_COMPLETE, 0, generation);
+        return;
+    }
+
+    tts_mode_ = true;
+    has_audio_ = true;
+    audio_only_ = true;
+
+    LOG_INFO("TTS: %d sentences from %S", (int)tts_sentences_.size(), url.c_str());
+
+    open_ok_ = true;
+    PostMessage(hwnd_, WM_OPEN_COMPLETE, 1, generation);
+}
+
 void Player::Close() {
     // Signal async open thread to abort
     open_running_ = false;
@@ -238,6 +289,15 @@ void Player::Close() {
     delete sync_;     sync_ = nullptr;
     delete osd_;      osd_ = nullptr;
 
+    // TTS cleanup
+    if (tts_) {
+        tts_->Stop();
+        delete tts_;
+        tts_ = nullptr;
+    }
+    tts_mode_ = false;
+    tts_sentences_.clear();
+
     if (source_) { source_->Close(); delete source_; source_ = nullptr; }
     if (callback_) { callback_->Release(); callback_ = nullptr; }
 
@@ -257,6 +317,19 @@ void Player::Close() {
 }
 
 void Player::Play() {
+    if (tts_mode_) {
+        auto s = state_.load(std::memory_order_acquire);
+        if (s != PlayerState::Stopped && s != PlayerState::Opening) return;
+
+        state_.store(PlayerState::Playing, std::memory_order_release);
+        start_time_.store(GetTimeSec(perf_freq_), std::memory_order_release);
+        pause_offset_.store(0, std::memory_order_release);
+        pause_start_.store(0, std::memory_order_release);
+
+        if (tts_) tts_->Start(hwnd_, tts_sentences_, 0);
+        return;
+    }
+
     if (!source_) return;
     auto s = state_.load(std::memory_order_acquire);
     if (s != PlayerState::Stopped && s != PlayerState::Opening) return;
@@ -308,6 +381,26 @@ bool Player::PlayPrev() {
 }
 
 void Player::PauseToggle() {
+    if (tts_mode_) {
+        auto s = state_.load(std::memory_order_acquire);
+        if (s == PlayerState::Playing) {
+            state_.store(PlayerState::Paused, std::memory_order_release);
+            pause_start_.store(GetTimeSec(perf_freq_), std::memory_order_release);
+            if (tts_) tts_->Pause();
+        } else if (s == PlayerState::Paused) {
+            double now = GetTimeSec(perf_freq_);
+            double prev = pause_offset_.load(std::memory_order_acquire);
+            double ps = pause_start_.load(std::memory_order_acquire);
+            if (ps > 0) {
+                pause_offset_.store(prev + (now - ps), std::memory_order_release);
+                pause_start_.store(0, std::memory_order_release);
+            }
+            state_.store(PlayerState::Playing, std::memory_order_release);
+            if (tts_) tts_->Resume();
+        }
+        return;
+    }
+
     if (state_.load(std::memory_order_acquire) == PlayerState::Playing) {
         state_.store(PlayerState::Paused, std::memory_order_release);
         pause_start_.store(GetTimeSec(perf_freq_), std::memory_order_release);
@@ -419,18 +512,32 @@ double Player::GetPosition() const {
 }
 
 void Player::SetVolume(float vol) {
+    if (tts_mode_ && tts_) {
+        tts_->SetVolume((int)(vol * 100));
+        return;
+    }
     if (ao_) ao_->SetVolume(vol);
 }
 
 float Player::GetVolume() const {
+    if (tts_mode_ && tts_) {
+        return (float)tts_->GetVolume() / 100.0f;
+    }
     return ao_ ? ao_->GetVolume() : 1.0f;
 }
 
 void Player::ToggleMute() {
+    if (tts_mode_ && tts_) {
+        // SAPI doesn't have a mute API — set volume to 0 or restore
+        // For simplicity, just set volume to 0
+        tts_->SetVolume(0);
+        return;
+    }
     if (ao_) ao_->SetMuted(!ao_->IsMuted());
 }
 
 bool Player::IsMuted() const {
+    if (tts_mode_) return false;
     return ao_ ? ao_->IsMuted() : false;
 }
 
@@ -488,6 +595,39 @@ void Player::DrawOSD(HDC hdc) {
         render_fps_timer_ = now;
     }
 
+    if (tts_mode_) {
+        if (!hdc || !tts_) return;
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, RGB(255, 255, 255));
+
+        char buf[128];
+        int cur = tts_->GetCurrentSentence() + 1;
+        int total = tts_->GetSentenceCount();
+        snprintf(buf, sizeof(buf), "TTS: %d/%d sentences", cur, total);
+        TextOutA(hdc, 10, 10, buf, (int)strlen(buf));
+
+        // Show current sentence snippet
+        if (cur > 0 && cur <= total) {
+            const std::wstring& sent = tts_sentences_[cur - 1];
+            // Show first 60 chars
+            char snippet[200];
+            int len = WideCharToMultiByte(CP_UTF8, 0, sent.c_str(),
+                (int)(sent.size() > 60 ? 60 : sent.size()),
+                snippet, sizeof(snippet) - 1, nullptr, nullptr);
+            if (len > 0) {
+                snippet[len] = '\0';
+                TextOutA(hdc, 10, 30, snippet, len);
+            }
+        }
+
+        // Volume indicator
+        auto s = state_.load(std::memory_order_acquire);
+        if (s == PlayerState::Paused) {
+            TextOutA(hdc, 10, 55, "[PAUSED]", 8);
+        }
+        return;
+    }
+
     if (osd_) {
         const wchar_t* track_title = nullptr;
         int track_idx = -1;
@@ -508,6 +648,12 @@ void Player::DrawOSD(HDC hdc) {
 }
 
 bool Player::IsFinished() const {
+    if (tts_mode_) {
+        auto s = state_.load(std::memory_order_acquire);
+        if (s != PlayerState::Playing) return false;
+        return tts_ && tts_->IsFinished();
+    }
+
     auto s = state_.load(std::memory_order_acquire);
     if (s == PlayerState::Paused) return false;
     if (s != PlayerState::Playing) return false;
@@ -1219,4 +1365,24 @@ void Player::CheckAudio() {
             }
         }
     }
+}
+
+void Player::TtsPrevSentence() {
+    if (!tts_mode_ || !tts_) return;
+    int cur = tts_->GetCurrentSentence();
+    if (cur > 0) tts_->SkipToSentence(cur - 1);
+}
+
+void Player::TtsNextSentence() {
+    if (!tts_mode_ || !tts_) return;
+    int cur = tts_->GetCurrentSentence();
+    if (cur + 1 < tts_->GetSentenceCount()) tts_->SkipToSentence(cur + 1);
+}
+
+void Player::TtsSetRate(int rate) {
+    if (tts_) tts_->SetRate(rate);
+}
+
+void Player::TtsSetVolume(int vol) {
+    if (tts_) tts_->SetVolume(vol);
 }

@@ -7,6 +7,7 @@
 #include "../util/osd.h"
 #include "source_reader_callback.h"
 #include "playlist.h"
+#include "../tts/tts_engine.h"
 #include <windows.h>
 #include <mfapi.h>
 #include <cstdint>
@@ -23,6 +24,8 @@
 #define WM_OPEN_COMPLETE    (WM_APP + 2)
 #define WM_PLAYLIST_DONE    (WM_APP + 3)
 #define WM_REOPEN_SOURCE    (WM_APP + 4)
+#define WM_TTS_SENTENCE_DONE (WM_APP + 5)
+#define WM_TTS_DONE          (WM_APP + 6)
 
 // Audio buffering thresholds
 constexpr int AUDIO_BUFFER_NETWORK_MULT = 5;   // 5 × bitrate for network (5 s buffer)
@@ -89,6 +92,13 @@ public:
     bool PlayPrev();
     bool HasPlaylist() const { return playlist_ && playlist_->GetCount() > 0; }
 
+    // TTS support
+    bool IsTtsMode() const { return tts_mode_; }
+    void TtsPrevSentence();
+    void TtsNextSentence();
+    void TtsSetRate(int rate);
+    void TtsSetVolume(int vol);
+
 public:
     bool IsOpenSuccessful() const { return open_ok_; }
     int GetOpenGeneration() const { return open_generation_.load(std::memory_order_acquire); }
@@ -96,6 +106,7 @@ public:
 
 private:
     void OpenAsync(std::wstring url, bool audio_only, int generation);
+    void OpenTextAsync(std::wstring url, int generation);
     void PlayCurrentTrack();
     void TryRestartLivePipeline();
     void StartVideoTimer();
@@ -156,6 +167,11 @@ private:
     std::atomic<int> open_generation_{0};  // Increments on each Open(); WM_OPEN_COMPLETE carries this
     bool open_ok_ = false;
     PlaylistManager* playlist_ = nullptr;
+
+    // TTS mode
+    bool tts_mode_ = false;
+    TtsEngine* tts_ = nullptr;
+    std::vector<std::wstring> tts_sentences_;
 
     // Frame queue (producer: MF callback, consumer: main thread)
     // All accesses are under vq_mutex_ — plain int is sufficient

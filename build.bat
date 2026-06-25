@@ -30,9 +30,10 @@ cl %OPTFLAGS% /W4 /utf-8 /EHsc ^
     src\demux\ts_packet_parser.cpp src\demux\pes_assembler.cpp src\demux\program_manager.cpp src\demux\ts_demuxer.cpp src\demux\ts_byte_stream.cpp src\demux\hls_media_source.cpp src\demux\hls_media_stream.cpp ^
     src\video_out\d3d11_video_output.cpp src\audio_out\wasapi_audio_output.cpp src\util\osd.cpp src\util\yuv_convert.cpp ^
     src\sync\sync_context.cpp ^
+    src\tts\text_reader.cpp src\tts\tts_engine.cpp ^
     /Fe:MinPlay.exe ^
     /link user32.lib gdi32.lib ole32.lib oleaut32.lib shell32.lib ^
-          mf.lib mfplat.lib mfreadwrite.lib mfuuid.lib uuid.lib shlwapi.lib d3d11.lib dxgi.lib d3dcompiler.lib winhttp.lib winmm.lib
+          mf.lib mfplat.lib mfreadwrite.lib mfuuid.lib uuid.lib shlwapi.lib d3d11.lib dxgi.lib d3dcompiler.lib winhttp.lib winmm.lib sapi.lib
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo === BUILD SUCCESS ===

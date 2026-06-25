@@ -1,6 +1,7 @@
 #include "util/com_ptr.h"
 #include "core/player.h"
 #include "core/playlist.h"
+#include "tts/text_reader.h"
 #include "util/log.h"
 #include <windows.h>
 #include <shellapi.h>
@@ -94,29 +95,45 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
                 // Seek control (MPlayer: Left/Right ±10s, Up/Down ±60s, PgUp/PgDn ±60s)
                 case VK_LEFT: {
-                    double step = ctrl ? 600.0 : 10.0;
-                    double pos = g_player->GetPosition() - step;
-                    g_player->Seek(pos < 0 ? 0 : pos);
+                    if (g_player->IsTtsMode()) {
+                        g_player->TtsPrevSentence();
+                    } else {
+                        double step = ctrl ? 600.0 : 10.0;
+                        double pos = g_player->GetPosition() - step;
+                        g_player->Seek(pos < 0 ? 0 : pos);
+                    }
                     break;
                 }
                 case VK_RIGHT: {
-                    double step = ctrl ? 600.0 : 10.0;
-                    double pos = g_player->GetPosition() + step;
-                    double dur = g_player->GetDuration();
-                    g_player->Seek(dur > 0 && pos > dur ? dur : pos);
+                    if (g_player->IsTtsMode()) {
+                        g_player->TtsNextSentence();
+                    } else {
+                        double step = ctrl ? 600.0 : 10.0;
+                        double pos = g_player->GetPosition() + step;
+                        double dur = g_player->GetDuration();
+                        g_player->Seek(dur > 0 && pos > dur ? dur : pos);
+                    }
                     break;
                 }
                 case VK_UP: {
-                    double step = ctrl ? 600.0 : 60.0;
-                    double pos = g_player->GetPosition() + step;
-                    double dur = g_player->GetDuration();
-                    g_player->Seek(dur > 0 && pos > dur ? dur : pos);
+                    if (g_player->IsTtsMode()) {
+                        g_player->TtsSetRate(ctrl ? 10 : 1);
+                    } else {
+                        double step = ctrl ? 600.0 : 60.0;
+                        double pos = g_player->GetPosition() + step;
+                        double dur = g_player->GetDuration();
+                        g_player->Seek(dur > 0 && pos > dur ? dur : pos);
+                    }
                     break;
                 }
                 case VK_DOWN: {
-                    double step = ctrl ? 600.0 : 60.0;
-                    double pos = g_player->GetPosition() - step;
-                    g_player->Seek(pos < 0 ? 0 : pos);
+                    if (g_player->IsTtsMode()) {
+                        g_player->TtsSetRate(ctrl ? -10 : -1);
+                    } else {
+                        double step = ctrl ? 600.0 : 60.0;
+                        double pos = g_player->GetPosition() - step;
+                        g_player->Seek(pos < 0 ? 0 : pos);
+                    }
                     break;
                 }
                 case VK_PRIOR: { // Page Up
@@ -303,6 +320,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             LOG_INFO("WM_PLAYLIST_DONE received");
             KillTimer(hwnd, TIMER_EOF_CHECK);
             DestroyWindow(hwnd);
+            break;
+
+        case WM_TTS_SENTENCE_DONE:
+            // TTS sentence completed — update display
+            if (g_player && g_player->IsTtsMode())
+                InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+
+        case WM_TTS_DONE:
+            // TTS finished — will be caught by IsFinished() in EOF timer
+            LOG_INFO("TTS playback finished");
             break;
 
         case WM_DESTROY:
