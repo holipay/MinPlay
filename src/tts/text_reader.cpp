@@ -1,7 +1,5 @@
 #include "text_reader.h"
 #include <windows.h>
-#include <fstream>
-#include <sstream>
 
 std::wstring TextReader::Read(const wchar_t* path) {
     // Read raw bytes

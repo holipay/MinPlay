@@ -11,6 +11,13 @@ add_executable(MinPlay
     src/core/source_reader_callback.cpp
     src/media/media_source.cpp
     src/network/hls_stream.cpp
+    src/demux/ts_packet_parser.cpp
+    src/demux/pes_assembler.cpp
+    src/demux/program_manager.cpp
+    src/demux/ts_demuxer.cpp
+    src/demux/ts_byte_stream.cpp
+    src/demux/hls_media_source.cpp
+    src/demux/hls_media_stream.cpp
     src/video_out/d3d11_video_output.cpp
     src/audio_out/wasapi_audio_output.cpp
     src/util/osd.cpp
@@ -36,6 +43,7 @@ target_link_libraries(MinPlay PRIVATE
     dxgi
     d3dcompiler
     winhttp
+    winmm
     sapi
 )
 

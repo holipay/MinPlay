@@ -221,7 +221,5 @@ private:
     static double GetTimeSec(const LARGE_INTEGER& freq);
     double ElapsedSec() const;
 
-    static uint8_t* ConvertYUY2ToNV12(const uint8_t* yuy2, int w, int h);
-    static uint8_t* ConvertI420ToNV12(const uint8_t* i420, int w, int h);
     bool RenderD3D(int w, int h);
 };

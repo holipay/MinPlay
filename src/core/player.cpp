@@ -679,14 +679,6 @@ bool Player::IsFinished() const {
     return false;
 }
 
-uint8_t* Player::ConvertYUY2ToNV12(const uint8_t* yuy2, int w, int h) {
-    return ::ConvertYUY2ToNV12(yuy2, w, h);
-}
-
-uint8_t* Player::ConvertI420ToNV12(const uint8_t* i420, int w, int h) {
-    return ::ConvertI420ToNV12(i420, w, h);
-}
-
 void Player::TryRestartLivePipeline() {
     if (!source_ || !callback_) return;
 
