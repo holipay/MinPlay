@@ -15,6 +15,7 @@ A lightweight, native Windows media player built with C++, Media Foundation, WAS
 - **Fullscreen** — saves/restores window state, hides cursor
 - **Process hardening** — heap termination on corruption, strict handle checks, AppInit DLL blocking
 - **Security** — HTTP(S) only protocol whitelist, TLS 1.2+, certificate revocation checking
+- **Text-to-Speech** — reads `.txt` files aloud via Windows SAPI, auto-selects Chinese voice
 
 ## Usage
 
@@ -23,6 +24,7 @@ MinPlay.exe video.mp4
 MinPlay.exe -a video.mp4
 MinPlay.exe --audio-only http://example.com/stream.m3u8
 MinPlay.exe http://example.com/live.m3u8
+MinPlay.exe book.txt
 ```
 
 ## Build
@@ -54,6 +56,14 @@ Output: `MinPlay.exe` in project root.
 | Mouse double-click | Toggle fullscreen |
 | Scroll wheel | Volume ±5% |
 
+**TTS mode** (`.txt` files) — additional controls:
+
+| Input | Action |
+|-------|--------|
+| Left / Right | Previous / Next sentence |
+| Up / Down | Speech rate ±1 |
+| Ctrl+Up / Ctrl+Down | Speech rate ±10 |
+
 ## Architecture
 
 ```
@@ -61,6 +71,7 @@ src/
 ├── main.cpp              — Window + message loop + dispatch
 ├── core/
 │   ├── player.cpp        — Play/pause/seek, A/V sync, frame display
+│   ├── playlist.cpp      — M3U playlist parsing
 │   └── source_reader_callback.cpp — IMFSourceReaderCallback impl
 ├── media/
 │   └── media_source.cpp  — MFSourceReader setup, stream enumeration
@@ -70,8 +81,13 @@ src/
 │   └── d3d11_video_output.cpp — D3D11 NV12 GPU shader, GDI OSD overlay
 ├── network/
 │   └── hls_stream.cpp    — HLS m3u8 parser, WinHTTP downloader, IMFByteStream
+├── demux/
+│   └── ts_*.cpp          — Custom TS demuxer (replaces MF's msdatmpg.dll)
 ├── sync/
 │   └── sync_context.cpp  — A/V synchronization logic
+├── tts/
+│   ├── text_reader.cpp   — TXT file reading, encoding detection, sentence splitting
+│   └── tts_engine.cpp    — Windows SAPI wrapper, Chinese voice selection
 └── util/
     ├── osd.cpp           — Time/fps overlay (GDI on D3D11 back buffer)
     └── yuv_convert.cpp   — YUY2/I420 → NV12 conversion
@@ -80,8 +96,10 @@ src/
 ## Data Flow
 
 ```
-MF callback → audio → ring buffer → WASAPI playback thread
-            → video → player queue → main thread timer → D3D11 render → GPU YUV→RGB → GDI OSD → Present
+Media:  MF callback → audio → ring buffer → WASAPI playback thread
+                  → video → player queue → main thread timer → D3D11 render → GPU YUV→RGB → GDI OSD → Present
+
+TTS:    .txt file → TextReader (encoding detect + sentence split) → TtsEngine (SAPI) → system audio
 ```
 
 ## Testing
